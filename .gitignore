@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.exe
+tesseract/
+cleanup_log.txt
