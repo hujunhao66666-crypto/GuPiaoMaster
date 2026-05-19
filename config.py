@@ -9,16 +9,22 @@ class Coefficients:
     BOARD_WEIGHT = 75.01080000000        # 每板的权重（× normalized board_count 0.05~1）
     # 创业板系数
     GEM_FACTOR = 2.0              # 创业板股票系数（300开头）
-    # 竞价抢筹整体系数（竞价抢筹总分 × 此系数）
-    RUSHING_ATTR_WEIGHT = 0.0200000000000000     # 竞价抢筹整体系数
-    # 竞价抢筹市值指数（0~1.5，<1 边际递减，=1 线性，>1 边际递增，由算法优化）
-    RUSHING_MARKET_CAP_EXPONENT = 0.5000000000000000  # 竞价抢筹市值指数
+    # 竞价抢筹属性总系数 a：抢筹加分 = (涨幅1*b + 涨幅2*b + ...) * a
+    RUSH_ATTR_COEFFICIENT = 0.0200000000000000     # 竞价抢筹属性总系数 a
+    # 涨幅系数 b：每只抢筹股票的涨幅权重
+    RUSH_PCT_COEFFICIENT = 0.2000000000000000       # 涨幅系数 b
     # 一字板相关系数
     YZ_OVERALL_WEIGHT = 0.1306000000000       # 一字板整体系数（归一化后每次命中约+0.5分）
     # 字母属性系数（拼音首字母，如Z、F、J、K等）
     LETTER_ATTR_WEIGHT = 2.4509000000000000      # 字母属性系数
+    # 竞价抢筹字母属性系数
+    RUSH_LETTER_ATTR_WEIGHT = 0.0200000000000000  # 抢筹字母属性系数
     # 地区属性系数（如浙江、江苏、广东等）
     REGION_ATTR_WEIGHT = 0.2744000000000000      # 地区属性系数
+    # 竞价抢筹地区属性系数
+    RUSH_REGION_ATTR_WEIGHT = 0.0200000000000000  # 抢筹地区属性系数
+    # 竞价抢筹市值系数：抢筹加分乘以(市值(亿) × 系数)
+    RUSH_MARKET_CAP_COEFFICIENT = 0.0100000000000000  # 抢筹市值系数
     # 属性数量差距系数
     ATTR_COUNT_WEIGHT = 0.016700000000      # 属性数量差距系数（指数，0=无放大，1=线性）
     # 负反馈相关系数
@@ -55,17 +61,20 @@ REGION_NAMES = {
 BAYESIAN_BOUNDS = {
     'stock_weight_first': (1.7834, 1.9834),  # 第一个股票的权重
     'stock_weight_last': (0.6369, 0.7269),  # 最后一个股票的权重
-    'board_weight': (75.1235, 75.0358),  # 每板的权重
-    'rushing_attr_weight': (0.0050, 0.1000),  # 竞价抢筹整体系数
-    'rushing_market_cap_exponent': (0.1000, 1.5000),  # 竞价抢筹市值指数
-    'yz_overall_weight': (0.1308, 0.1306),  # 一字板整体系数
+    'board_weight': (75.0358, 75.1235),  # 每板的权重
+    'rush_attr_coefficient': (0.0050, 0.1000),  # 竞价抢筹属性总系数 a（弱线性+非线性）
+    'rush_pct_coefficient': (0.0100, 1.0000),   # 涨幅系数 b（非线性相关）
+    'rush_letter_attr_weight': (0.0, 0.0300),  # 抢筹字母属性系数（弱相关→收窄到近零区）
+    'rush_region_attr_weight': (0.0050, 0.1000),  # 抢筹地区属性系数（非线性相关）
+    'rush_market_cap_coefficient': (0.0010, 0.1000),  # 抢筹市值系数（非线性相关）
+    'yz_overall_weight': (0.1306, 0.1308),  # 一字板整体系数
     'letter_attr_weight': (2.4501, 2.4517),  # 字母属性系数
     'region_attr_weight': (0.2494, 0.2994),  # 地区属性系数
     'attr_count_weight': (0.0167, 0.0167),  # 属性数量差距系数
     'negative_attr_count_weight': (2.0294, 2.0309),  # 负反馈属性数量差距系数
-    'negative_overall_weight': (197.0823, 196.8613),  # 负反馈整体系数
+    'negative_overall_weight': (196.8613, 197.0823),  # 负反馈整体系数
     'board_press_weight': (118.2321, 118.2633),  # 同板压制系数
-    'node_guide_weight': (0.0337, 0.0336),  # 节点指引系数
+    'node_guide_weight': (0.0336, 0.0337),  # 节点指引系数
     'holder_ratio_weight': (0.0100, 0.0100),  # 股东持股比例权重系数
     'market_cap_weight': (0.0100, 0.0612),  # 
     'market_cap_exponent': (0.7022, 0.7672),  # 
@@ -141,9 +150,12 @@ COEFFICIENT_NAMES = {
     'STOCK_WEIGHT_FIRST': '第一个股票的权重',
     'STOCK_WEIGHT_LAST': '最后一个股票的权重',
     'BOARD_WEIGHT': '每板权重',
-    'RUSHING_WEIGHT': '竞价抢筹权重',
-    'RUSHING_ATTR_WEIGHT': '竞价抢筹整体系数',
-    'RUSHING_MARKET_CAP_EXPONENT': '竞价抢筹市值指数',
+    'RUSHING_WEIGHT': '竞价抢筹权重(废弃)',
+    'RUSH_ATTR_COEFFICIENT': '抢筹属性总系数 a',
+    'RUSH_PCT_COEFFICIENT': '涨幅系数 b',
+    'RUSH_LETTER_ATTR_WEIGHT': '抢筹字母属性系数',
+    'RUSH_REGION_ATTR_WEIGHT': '抢筹地区属性系数',
+    'RUSH_MARKET_CAP_COEFFICIENT': '抢筹市值系数',
     'YZ_OVERALL_WEIGHT': '一字板整体系数',
     'LETTER_ATTR_WEIGHT': '字母属性系数',
     'REGION_ATTR_WEIGHT': '地区属性系数',
@@ -163,8 +175,11 @@ BAYESIAN_TO_COEFFICIENT = {
     'stock_weight_last': 'STOCK_WEIGHT_LAST',
     'board_weight': 'BOARD_WEIGHT',
     'rushing_weight': 'RUSHING_WEIGHT',
-    'rushing_attr_weight': 'RUSHING_ATTR_WEIGHT',
-    'rushing_market_cap_exponent': 'RUSHING_MARKET_CAP_EXPONENT',
+    'rush_attr_coefficient': 'RUSH_ATTR_COEFFICIENT',
+    'rush_pct_coefficient': 'RUSH_PCT_COEFFICIENT',
+    'rush_letter_attr_weight': 'RUSH_LETTER_ATTR_WEIGHT',
+    'rush_region_attr_weight': 'RUSH_REGION_ATTR_WEIGHT',
+    'rush_market_cap_coefficient': 'RUSH_MARKET_CAP_COEFFICIENT',
     'yz_overall_weight': 'YZ_OVERALL_WEIGHT',
     'letter_attr_weight': 'LETTER_ATTR_WEIGHT',
     'region_attr_weight': 'REGION_ATTR_WEIGHT',

@@ -3,16 +3,19 @@ import warnings
 import math
 import random
 warnings.filterwarnings('ignore', message='libpng warning: iCCP: known incorrect sRGB profile')
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QComboBox, QDateEdit, QCompleter, QTextEdit, QScrollArea, QGridLayout, QSizePolicy, QLayout, QSpinBox, QFrame, QCheckBox, QFileDialog, QMessageBox, QGroupBox, QDoubleSpinBox)
-from PyQt5.QtCore import Qt, QDate, QRect, QSize, QTimer, QThread, pyqtSignal
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QComboBox, QDateEdit, QCompleter, QTextEdit, QScrollArea, QGridLayout, QSizePolicy, QSpinBox, QFrame, QCheckBox, QFileDialog, QMessageBox, QGroupBox, QDoubleSpinBox, QDialog, QDialogButtonBox, QHeaderView)
+from PyQt5.QtCore import Qt, QDate, QTimer, QThread, pyqtSignal
 import sqlite3
 import os
 from datetime import datetime, timedelta
 from pypinyin import pinyin, Style
 import pandas as pd
+import requests
+import re
+import json
 
 # 导入配置文件
-from config import Coefficients, BAYESIAN_BOUNDS, COEFFICIENT_NAMES, BAYESIAN_TO_COEFFICIENT, SHRINK_FACTOR, SHRINK_ROUNDS, SHRINK_MIN_RATIO, L2_LAMBDA, L2_SCALE, NORM_YZ_SCORE, NORM_QC_SCORE, NORM_FF_SCORE, NORM_BOARD_COUNT, NORM_HOLDER_RATIO, NORM_BOARD_PRESS, NORM_NODE_GUIDE, REGION_NAMES, NORM_REGION_SCORE, ATTR_RENAME_MAP, ATTR_REMOVE_SET, NORM_MARKET_CAP, NORM_RUSH_MARKET_CAP, NORM_RUSH_STOCKS
+from config import Coefficients, BAYESIAN_BOUNDS, COEFFICIENT_NAMES, BAYESIAN_TO_COEFFICIENT, SHRINK_FACTOR, SHRINK_ROUNDS, SHRINK_MIN_RATIO, L2_LAMBDA, L2_SCALE, NORM_YZ_SCORE, NORM_QC_SCORE, NORM_FF_SCORE, NORM_BOARD_COUNT, NORM_HOLDER_RATIO, NORM_BOARD_PRESS, NORM_NODE_GUIDE, REGION_NAMES, NORM_REGION_SCORE, ATTR_RENAME_MAP, ATTR_REMOVE_SET, NORM_MARKET_CAP
 # 尝试导入OCR库
 try:
     from PIL import Image
@@ -23,679 +26,9 @@ except ImportError:
 
 MAX_RUSH_ATTRS = 30  # 竞价抢筹属性每日最大条数
 
-class FlowLayout(QLayout):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setSpacing(5)
-        self._items = []
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def itemAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def count(self):
-        return len(self._items)
-
-    def sizeHint(self):
-        # 计算实际内容大小
-        x = 0
-        y = 0
-        line_height = 30
-        spacing = 5
-        max_width = 0
-        
-        for item in self._items:
-            wid = item.widget()
-            if wid is None:
-                continue
-            size_hint = wid.sizeHint()
-            if x + size_hint.width() > 800:  # 假设最大宽度为800
-                x = 0
-                y += line_height + spacing
-            x += size_hint.width() + spacing
-            max_width = max(max_width, x)
-        
-        return QSize(max_width, y + line_height)
-
-    def minimumSize(self):
-        return QSize(400, 50)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self.doLayout(rect)
-
-    def doLayout(self, rect):
-        x = rect.x()
-        y = rect.y()
-        line_height = 30
-        spacing = 5
-
-        for item in self._items:
-            wid = item.widget()
-            if wid is None:
-                continue
-            size_hint = wid.sizeHint()
-            if x + size_hint.width() > rect.right():
-                x = rect.x()
-                y += line_height + spacing
-            item.setGeometry(QRect(x, y, size_hint.width(), size_hint.height()))
-            x += size_hint.width() + spacing
-        
-        # 确保容器高度足够容纳所有内容
-        self.parentWidget().setMinimumHeight(y + line_height + 10)
-
-    def clear(self):
-        for item in self._items:
-            if item.widget():
-                item.widget().deleteLater()
-        self._items.clear()
-
-class NumericTableItem(QTableWidgetItem):
-    def __lt__(self, other):
-        if self.data(Qt.UserRole) is not None and other.data(Qt.UserRole) is not None:
-            return self.data(Qt.UserRole) < other.data(Qt.UserRole)
-        return super().__lt__(other)
-
-class BayesianOptimizationThread(QThread):
-    progress_signal = pyqtSignal(dict)
-    finished_signal = pyqtSignal(dict)
-    error_signal = pyqtSignal(str)
-
-    def __init__(self, parent, db_path, train_start, train_end, valid_start, valid_end,
-                 user_runs, user_init_points, user_n_iter, user_shrink_rounds, custom_pbounds=None,
-                 linear_param_set=None, ema_alpha=0.95):
-        super().__init__(parent)
-        self.main = parent
-        self.db_path = db_path
-        self.train_start = train_start
-        self.train_end = train_end
-        self.valid_start = valid_start
-        self.valid_end = valid_end
-        self.user_runs = user_runs
-        self.user_init_points = user_init_points
-        self.user_n_iter = user_n_iter
-        self.user_shrink_rounds = user_shrink_rounds
-        self.custom_pbounds = custom_pbounds
-        self.linear_param_set = linear_param_set or set()
-        self.ema_alpha = ema_alpha
-        self.original_coeffs = {}
-        self.logs = []
-
-    def log(self, msg):
-        self.logs.append(msg)
-        print(msg)
-
-    def run(self):
-        from bayes_opt import BayesianOptimization
-        try:
-            if self.custom_pbounds is not None:
-                pbounds = self.custom_pbounds.copy()
-                self.log(f"[贝叶斯] 使用自适应参数范围（线性窄域/非线性全域）")
-            else:
-                pbounds = BAYESIAN_BOUNDS.copy()
-            pbounds['stock_weight_first'] = (1.0, 3.0)
-            pbounds['stock_weight_last'] = (0.1, 1.0)
-
-            self.original_coeffs = {
-                'STOCK_WEIGHT_FIRST': self.main.STOCK_WEIGHT_FIRST,
-                'STOCK_WEIGHT_LAST': self.main.STOCK_WEIGHT_LAST,
-                'BOARD_WEIGHT': self.main.BOARD_WEIGHT,
-                'RUSHING_ATTR_WEIGHT': self.main.RUSHING_ATTR_WEIGHT,
-                'YZ_OVERALL_WEIGHT': self.main.YZ_OVERALL_WEIGHT,
-                'LETTER_ATTR_WEIGHT': self.main.LETTER_ATTR_WEIGHT,
-                'REGION_ATTR_WEIGHT': self.main.REGION_ATTR_WEIGHT,
-                'ATTR_COUNT_WEIGHT': self.main.ATTR_COUNT_WEIGHT,
-                'NEGATIVE_ATTR_COUNT_WEIGHT': self.main.NEGATIVE_ATTR_COUNT_WEIGHT,
-                'NEGATIVE_OVERALL_WEIGHT': self.main.NEGATIVE_OVERALL_WEIGHT,
-                'BOARD_PRESS_WEIGHT': self.main.BOARD_PRESS_WEIGHT,
-                'NODE_GUIDE_WEIGHT': self.main.NODE_GUIDE_WEIGHT,
-                'HOLDER_RATIO_WEIGHT': self.main.HOLDER_RATIO_WEIGHT,
-                'MARKET_CAP_WEIGHT': self.main.MARKET_CAP_WEIGHT,
-                'MARKET_CAP_EXPONENT': self.main.MARKET_CAP_EXPONENT,
-            }
-
-            def set_params(params):
-                self.main.STOCK_WEIGHT_FIRST = params['stock_weight_first']
-                self.main.STOCK_WEIGHT_LAST = params['stock_weight_last']
-                self.main.BOARD_WEIGHT = params['board_weight']
-                self.main.RUSHING_ATTR_WEIGHT = params['rushing_attr_weight']
-                self.main.YZ_OVERALL_WEIGHT = params['yz_overall_weight']
-                self.main.LETTER_ATTR_WEIGHT = params['letter_attr_weight']
-                self.main.REGION_ATTR_WEIGHT = params['region_attr_weight']
-                self.main.ATTR_COUNT_WEIGHT = params['attr_count_weight']
-                self.main.NEGATIVE_ATTR_COUNT_WEIGHT = params['negative_attr_count_weight']
-                self.main.NEGATIVE_OVERALL_WEIGHT = params['negative_overall_weight']
-                self.main.BOARD_PRESS_WEIGHT = params['board_press_weight']
-                self.main.NODE_GUIDE_WEIGHT = params['node_guide_weight']
-                self.main.HOLDER_RATIO_WEIGHT = params['holder_ratio_weight']
-                self.main.MARKET_CAP_WEIGHT = params['market_cap_weight']
-                self.main.MARKET_CAP_EXPONENT = params['market_cap_exponent']
-                # 应用因子治理：禁用的因子强制为0（加法权重）或1（乘法因子）
-                gov = getattr(self.main, '_factor_enabled', {})
-                if not gov.get('stock_weight_first', True):
-                    self.main.STOCK_WEIGHT_FIRST = 0.0
-                if not gov.get('stock_weight_last', True):
-                    self.main.STOCK_WEIGHT_LAST = 0.0
-                if not gov.get('board_weight', True):
-                    self.main.BOARD_WEIGHT = 0.0
-                if not gov.get('rushing_attr_weight', True):
-                    self.main.RUSHING_ATTR_WEIGHT = 0.0
-                if not gov.get('yz_overall_weight', True):
-                    self.main.YZ_OVERALL_WEIGHT = 0.0
-                if not gov.get('letter_attr_weight', True):
-                    self.main.LETTER_ATTR_WEIGHT = 0.0
-                if not gov.get('region_attr_weight', True):
-                    self.main.REGION_ATTR_WEIGHT = 0.0
-                if not gov.get('attr_count_weight', True):
-                    self.main.ATTR_COUNT_WEIGHT = 0.0
-                if not gov.get('negative_attr_count_weight', True):
-                    self.main.NEGATIVE_ATTR_COUNT_WEIGHT = 0.0
-                if not gov.get('negative_overall_weight', True):
-                    self.main.NEGATIVE_OVERALL_WEIGHT = 0.0
-                if not gov.get('board_press_weight', True):
-                    self.main.BOARD_PRESS_WEIGHT = 1.0
-                if not gov.get('node_guide_weight', True):
-                    self.main.NODE_GUIDE_WEIGHT = 1.0
-                if not gov.get('holder_ratio_weight', True):
-                    self.main.HOLDER_RATIO_WEIGHT = 0.0
-                if not gov.get('market_cap_weight', True):
-                    self.main.MARKET_CAP_WEIGHT = 0.0
-                if not gov.get('market_cap_exponent', True):
-                    self.main.MARKET_CAP_EXPONENT = 0.0
-
-            def evaluate_train(**params):
-                set_params(params)
-                return self.main._optimization_backtest(self.train_start, self.train_end)
-
-            def evaluate_valid(params):
-                set_params(params)
-                return self.main._optimization_backtest(self.valid_start, self.valid_end)
-
-            total_stages = self.user_runs + (self.user_shrink_rounds if self.user_shrink_rounds > 0 else 0) + 1
-            stage = 0
-
-            optimization_results = []
-
-            for run_num in range(self.user_runs):
-                stage_text = f'宽搜索 ({run_num + 1}/{self.user_runs})'
-                pct = int((stage + 1) * 90 / total_stages)
-                self.progress_signal.emit({'stage': stage_text, 'pct': pct, 'log': f'第 {run_num + 1}/{self.user_runs} 次贝叶斯优化...'})
-
-                optimizer = BayesianOptimization(
-                    f=evaluate_train, pbounds=pbounds, verbose=2,
-                    random_state=42 + run_num,
-                )
-                optimizer.maximize(init_points=self.user_init_points, n_iter=self.user_n_iter)
-
-                train_score = optimizer.max['target']
-                current_params = optimizer.max['params']
-                optimization_results.append((train_score, current_params))
-                self.log(f'第 {run_num + 1} 次宽搜索完成，训练得分: {train_score:.2f}')
-                stage += 1
-
-            optimization_results.sort(key=lambda x: x[0], reverse=True)
-            best_train_score, best_params = optimization_results[0]
-            original_bounds = pbounds.copy()
-            self.log(f'宽搜索完成，最优训练得分: {best_train_score:.2f}')
-
-            final_shrink_factor = None
-            if self.user_shrink_rounds > 0:
-                for shrink_round in range(self.user_shrink_rounds):
-                    stage_text = f'区间收缩 ({shrink_round + 1}/{self.user_shrink_rounds})'
-                    pct = int((stage + 1) * 90 / total_stages)
-                    self.progress_signal.emit({'stage': stage_text, 'pct': pct, 'log': f'区间收缩第 {shrink_round + 1} 轮...'})
-
-                    factor = SHRINK_FACTOR ** (shrink_round + 1)
-                    final_shrink_factor = factor
-                    shrank_bounds = {}
-                    for param_name, (orig_low, orig_high) in original_bounds.items():
-                        best_val = best_params[param_name]
-                        orig_range = orig_high - orig_low
-                        half_range = orig_range * factor / 2
-                        min_range = orig_range * SHRINK_MIN_RATIO / 2
-                        half_range = max(half_range, min_range)
-                        new_low = max(orig_low, best_val - half_range)
-                        new_high = min(orig_high, best_val + half_range)
-                        shrank_bounds[param_name] = (new_low, new_high)
-
-                    shrink_opt = BayesianOptimization(
-                        f=evaluate_train, pbounds=shrank_bounds, verbose=2,
-                        random_state=100 + shrink_round,
-                    )
-                    shrink_opt.maximize(init_points=max(5, self.user_init_points // 2), n_iter=max(10, self.user_n_iter // 2))
-
-                    shrink_score = shrink_opt.max['target']
-                    shrink_params = shrink_opt.max['params']
-                    self.log(f'区间收缩第 {shrink_round + 1} 轮 训练得分: {shrink_score:.2f}')
-
-                    if shrink_score > best_train_score:
-                        best_train_score = shrink_score
-                        best_params = shrink_params
-                        optimization_results.append((shrink_score, shrink_params))
-                        self.log(f'发现更优参数!')
-                    stage += 1
-
-            self.progress_signal.emit({'stage': '验证中', 'pct': 92, 'log': '正在验证最优参数...'})
-
-            valid_results = []
-            for i, (train_score, params) in enumerate(optimization_results):
-                valid_score = evaluate_valid(params)
-                valid_results.append((valid_score, params, train_score))
-                self.log(f'第 {i + 1} 组 验证得分: {valid_score:.2f}')
-
-            valid_results.sort(key=lambda x: (x[0], x[2]), reverse=True)
-            best_valid_score, best_params, best_train_score = valid_results[0]
-            best_params = {k: round(v, 4) for k, v in best_params.items()}
-
-            # === 后处理：EMA平滑 → 正则约束 → 稳定性校验 → 重优化 ===
-            chrono_params = [params for _, params in optimization_results]
-            ema_log_header = False
-
-            if len(chrono_params) >= 2:
-                self.log('')
-                self.log('=' * 70)
-                self.log(f'[后处理] EMA系数平滑处理 (α={self.ema_alpha}) — 消除随机波动/采样噪声/局部极值跳变')
-                self.log('=' * 70)
-                ema_smoothed = chrono_params[0].copy()
-                for i in range(1, len(chrono_params)):
-                    for k in ema_smoothed:
-                        ema_smoothed[k] = self.ema_alpha * chrono_params[i][k] + (1 - self.ema_alpha) * ema_smoothed[k]
-                for k in sorted(best_params.keys()):
-                    raw = best_params[k]
-                    smooth = round(ema_smoothed[k], 4)
-                    self.log(f'  EMA({k}): {raw:.4f} → {smooth:.4f}    delta={smooth - raw:+.4f}')
-                self.log('  → 以EMA平滑值替代原始最优参数')
-                for k in best_params:
-                    best_params[k] = round(ema_smoothed[k], 4)
-
-            self.log('')
-            self.log('=' * 70)
-            linear_count = sum(1 for k in best_params if k in self.linear_param_set)
-            nonlinear_count = len(best_params) - linear_count
-            self.log(f'[正则化] 线性参数{linear_count}个 → L2约束 / 非线性参数{nonlinear_count}个 → 弹性网约束')
-            self.log('=' * 70)
-            lambda_ridge = L2_LAMBDA
-            lambda_lasso = L2_LAMBDA * 0.5
-            for k in sorted(best_params.keys()):
-                orig = best_params[k]
-                if k in self.linear_param_set:
-                    penalty = 1 - lambda_ridge
-                    best_params[k] = round(orig * penalty, 4)
-                    self.log(f'  [L2] {k}: {orig:.4f} × {penalty:.4f} = {best_params[k]:.4f}')
-                else:
-                    penalty = 1 - (lambda_ridge + lambda_lasso)
-                    best_params[k] = round(orig * penalty, 4)
-                    self.log(f'  [EN] {k}: {orig:.4f} × {penalty:.4f} = {best_params[k]:.4f}')
-
-            self.log('')
-            self.log('=' * 70)
-            self.log('[稳定性] 连续3轮参数波动检测 (CV < 5% 为合格)')
-            self.log('=' * 70)
-            stable_flag = True
-            unstable_params = []
-            if len(chrono_params) >= 3:
-                last3 = chrono_params[-3:]
-                for k in sorted(best_params.keys()):
-                    vals = [p[k] for p in last3]
-                    mean_v = sum(vals) / len(vals)
-                    if mean_v == 0:
-                        cv = 0.0
-                    else:
-                        std_v = math.sqrt(sum((v - mean_v) ** 2 for v in vals) / len(vals))
-                        cv = std_v / abs(mean_v)
-                    ok = cv < 0.05
-                    if not ok:
-                        stable_flag = False
-                        unstable_params.append(k)
-                    self.log(f'  {"✓" if ok else "✗"} {k}: mean={mean_v:.4f}, std={std_v:.4f}, CV={cv:.4f}')
-            else:
-                self.log('  迭代次数不足3轮，跳过稳定性检测')
-
-            if not stable_flag and len(chrono_params) >= 3:
-                self.log('')
-                self.log('=' * 70)
-                self.log('[重优化] 参数波动过大，执行小幅贝叶斯寻优+管控流程')
-                self.log('=' * 70)
-                self.log(f'  不稳定参数: {", ".join(unstable_params)}')
-                try:
-                    reopt_lo = {}
-                    reopt_hi = {}
-                    for k in best_params.keys():
-                        lo, hi = BAYESIAN_BOUNDS[k]
-                        center = best_params[k]
-                        half_range = (hi - lo) * 0.08
-                        reopt_lo[k] = max(lo, center - half_range)
-                        reopt_hi[k] = min(hi, center + half_range)
-                    reopt_bounds = {k: (reopt_lo[k], reopt_hi[k]) for k in best_params}
-
-                    self.log(f'  重优化搜索范围:')
-                    for k in sorted(reopt_bounds.keys()):
-                        self.log(f'    {k}: [{reopt_lo[k]:.4f}, {reopt_hi[k]:.4f}]')
-
-                    reopt = BayesianOptimization(
-                        f=evaluate_train, pbounds=reopt_bounds, verbose=0,
-                        random_state=999,
-                    )
-                    reopt.maximize(init_points=8, n_iter=20)
-                    reopt_score = reopt.max['target']
-                    reopt_params = reopt.max['params']
-                    self.log(f'  重优化训练得分: {reopt_score:.2f}')
-
-                    reopt_valid = evaluate_valid(reopt_params)
-                    self.log(f'  重优化验证得分: {reopt_valid:.2f}')
-
-                    combined_ratio = 0.6
-                    if reopt_valid * combined_ratio + reopt_score * (1 - combined_ratio) > \
-                       best_valid_score * combined_ratio + best_train_score * (1 - combined_ratio):
-                        self.log('  → 重优化参数更优，采纳重优化结果')
-                        for k in best_params:
-                            best_params[k] = round(reopt_params[k], 4)
-                        best_valid_score = reopt_valid
-                        best_train_score = reopt_score
-                    else:
-                        self.log('  → 重优化参数未超越当前最优，保留原始参数')
-                except Exception as reopt_e:
-                    self.log(f'  重优化失败: {reopt_e}')
-
-            # 重新验证最终参数（平滑+正则已改变参数值）
-            self.log('')
-            self.log('─' * 70)
-            self.log('[验证] 对后处理最终参数重新验证')
-            self.log('─' * 70)
-            set_params(best_params)
-            final_valid = self.main._optimization_backtest(self.valid_start, self.valid_end)
-            final_train = self.main._optimization_backtest(self.train_start, self.train_end)
-            self.log(f'  最终训练得分: {final_train:.2f}  (原: {best_train_score:.2f})')
-            self.log(f'  最终验证得分: {final_valid:.2f}  (原: {best_valid_score:.2f})')
-            best_train_score = round(final_train, 2)
-            best_valid_score = round(final_valid, 2)
-
-            self.log('')
-            self.log('─' * 70)
-            self.log(f'[最终] 后处理完成，最终参数如下:')
-            for k, v in best_params.items():
-                self.log(f'  {k} = {v}')
-
-            self.progress_signal.emit({'stage': '更新配置', 'pct': 97, 'log': '正在更新配置文件...'})
-
-            self.main.STOCK_WEIGHT_FIRST = best_params['stock_weight_first']
-            self.main.STOCK_WEIGHT_LAST = best_params['stock_weight_last']
-            self.main.BOARD_WEIGHT = best_params['board_weight']
-            self.main.RUSHING_ATTR_WEIGHT = best_params['rushing_attr_weight']
-            self.main.YZ_OVERALL_WEIGHT = best_params['yz_overall_weight']
-            self.main.LETTER_ATTR_WEIGHT = best_params['letter_attr_weight']
-            self.main.REGION_ATTR_WEIGHT = best_params['region_attr_weight']
-            self.main.ATTR_COUNT_WEIGHT = best_params['attr_count_weight']
-            self.main.NEGATIVE_ATTR_COUNT_WEIGHT = best_params['negative_attr_count_weight']
-            self.main.NEGATIVE_OVERALL_WEIGHT = best_params['negative_overall_weight']
-            self.main.BOARD_PRESS_WEIGHT = best_params['board_press_weight']
-            self.main.NODE_GUIDE_WEIGHT = best_params['node_guide_weight']
-            self.main.HOLDER_RATIO_WEIGHT = best_params['holder_ratio_weight']
-
-            try:
-                update_factor = final_shrink_factor if final_shrink_factor is not None else 0.5
-                new_bounds = {}
-                for param_name, (orig_low, orig_high) in original_bounds.items():
-                    best_val = best_params[param_name]
-                    orig_range = orig_high - orig_low
-                    half_range = orig_range * update_factor / 2
-                    min_range = orig_range * SHRINK_MIN_RATIO / 2
-                    half_range = max(half_range, min_range)
-                    new_low = max(orig_low, best_val - half_range)
-                    new_high = min(orig_high, best_val + half_range)
-                    new_bounds[param_name] = (new_low, new_high)
-
-                config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                bounds_lines = []
-                for param_name in BAYESIAN_BOUNDS:
-                    lo, hi = new_bounds[param_name]
-                    comment = {
-                        'stock_weight_first': '第一个股票的权重',
-                        'stock_weight_last': '最后一个股票的权重',
-                        'board_weight': '每板的权重',
-                        'rushing_weight': '竞价抢筹权重(废弃)',
-                        'rushing_attr_weight': '竞价抢筹属性权重',
-                        'yz_overall_weight': '一字板整体系数',
-                        'letter_attr_weight': '字母属性系数',
-                        'region_attr_weight': '地区属性系数',
-                        'attr_count_weight': '属性数量差距系数',
-                        'negative_attr_count_weight': '负反馈属性数量差距系数',
-                        'negative_overall_weight': '负反馈整体系数',
-                        'board_press_weight': '同板压制系数',
-                        'node_guide_weight': '节点指引系数',
-                        'holder_ratio_weight': '股东持股比例权重系数',
-                    }.get(param_name, '')
-                    bounds_lines.append(f"    '{param_name}': ({lo:.4f}, {hi:.4f}),  # {comment}")
-                new_bounds_section = "# 贝叶斯优化参数搜索范围\nBAYESIAN_BOUNDS = {\n" + "\n".join(bounds_lines) + "\n}\n"
-                import re
-                content = re.sub(
-                    r'# 贝叶斯优化参数搜索范围\nBAYESIAN_BOUNDS = \{.*?\n\}',
-                    new_bounds_section.rstrip(),
-                    content, flags=re.DOTALL
-                )
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                self.log('参数搜索范围已更新到配置文件')
-            except Exception as e:
-                self.log(f'更新配置文件失败: {e}')
-
-            import json
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            try:
-                from datetime import datetime
-                cursor.execute('''
-                    INSERT INTO bayesian_results (date, train_score, valid_score, params_json, train_start, train_end, valid_start, valid_end)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (datetime.now().strftime('%Y-%m-%d'), best_train_score, best_valid_score, json.dumps(best_params),
-                      self.train_start, self.train_end, self.valid_start, self.valid_end))
-                conn.commit()
-            finally:
-                for _attr, _val in _gov_backup.items():
-                    setattr(self, _attr, _val)
-                conn.close()
-
-            self.finished_signal.emit({
-                'valid_score': best_valid_score,
-                'train_score': best_train_score,
-                'params': best_params,
-                'logs': '\n'.join(self.logs),
-            })
-
-        except Exception as e:
-            for key, value in self.original_coeffs.items():
-                setattr(self.main, key, value)
-            self.error_signal.emit(str(e))
-            import traceback
-            traceback.print_exc()
-
-
-class CorrelationAnalysisThread(QThread):
-    progress_signal = pyqtSignal(int)
-    finished_signal = pyqtSignal(dict)
-    error_signal = pyqtSignal(str)
-
-    def __init__(self, parent, db_path, start_str, end_str):
-        super().__init__(parent)
-        self.main = parent
-        self.db_path = db_path
-        self.start_str = start_str
-        self.end_str = end_str
-
-    @staticmethod
-    def _calc_pearson(x, y):
-        n = len(x)
-        sum_x = sum(x)
-        sum_y = sum(y)
-        sum_xy = sum(xi * yi for xi, yi in zip(x, y))
-        sum_x2 = sum(xi * xi for xi in x)
-        sum_y2 = sum(yi * yi for yi in y)
-        numerator = n * sum_xy - sum_x * sum_y
-        denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
-        return numerator / denominator if denominator != 0 else 0.0
-
-    @staticmethod
-    def _calc_mutual_info(x, y):
-        n = len(x)
-        bins = max(5, int(math.sqrt(n) * 0.8))
-        min_x, max_x = min(x), max(x)
-        min_y, max_y = min(y), max(y)
-        if max_x == min_x or max_y == min_y:
-            return 0.0
-
-        bin_w_x = (max_x - min_x) / bins
-        bin_w_y = (max_y - min_y) / bins
-
-        def discretize(vals, min_v, bin_w):
-            res = []
-            for v in vals:
-                idx = int((v - min_v) / bin_w)
-                if idx >= bins:
-                    idx = bins - 1
-                res.append(idx)
-            return res
-
-        x_idx = discretize(x, min_x, bin_w_x)
-        y_idx = discretize(y, min_y, bin_w_y)
-
-        p_x = [0.0] * bins
-        p_y = [0.0] * bins
-        p_xy = [[0.0] * bins for _ in range(bins)]
-
-        for i in range(n):
-            p_x[x_idx[i]] += 1.0
-            p_y[y_idx[i]] += 1.0
-            p_xy[x_idx[i]][y_idx[i]] += 1.0
-
-        p_x = [v / n for v in p_x]
-        p_y = [v / n for v in p_y]
-        for i in range(bins):
-            for j in range(bins):
-                p_xy[i][j] /= n
-
-        def entropy(p):
-            return -sum(pi * math.log2(pi) for pi in p if pi > 0)
-
-        h_x = entropy(p_x)
-        h_y = entropy(p_y)
-        h_xy = entropy([p_xy[i][j] for i in range(bins) for j in range(bins)])
-
-        return max(0.0, h_x + h_y - h_xy)
-
-    @staticmethod
-    def _calc_linear_regression(x, y):
-        n = len(x)
-        sum_x = sum(x)
-        sum_y = sum(y)
-        sum_xy = sum(xi * yi for xi, yi in zip(x, y))
-        sum_x2 = sum(xi * xi for xi in x)
-        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x) if (n * sum_x2 - sum_x * sum_x) != 0 else 0.0
-        intercept = (sum_y - slope * sum_x) / n
-        ss_res = sum((yi - (slope * xi + intercept)) ** 2 for xi, yi in zip(x, y))
-        ss_tot = sum((yi - sum_y / n) ** 2 for yi in y)
-        r_squared = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
-        return slope, intercept, r_squared
-
-    def run(self):
-        try:
-            param_keys = [
-                'stock_weight_first', 'stock_weight_last', 'board_weight',
-                'rushing_attr_weight', 'yz_overall_weight', 'letter_attr_weight',
-                'region_attr_weight', 'attr_count_weight',
-                'negative_attr_count_weight', 'negative_overall_weight',
-                'board_press_weight', 'node_guide_weight', 'holder_ratio_weight',
-                'market_cap_weight', 'market_cap_exponent',
-            ]
-
-            display_names = {
-                'stock_weight_first': '首股票权重',
-                'stock_weight_last': '末股票权重',
-                'board_weight': '每板权重',
-                'rushing_attr_weight': '竞价抢筹权重',
-                'yz_overall_weight': '一字板整体',
-                'letter_attr_weight': '字母属性',
-                'region_attr_weight': '地区属性',
-                'attr_count_weight': '属性数量差距',
-                'negative_attr_count_weight': '负反馈数量差距',
-                'negative_overall_weight': '负反馈整体',
-                'board_press_weight': '同板压制',
-                'node_guide_weight': '节点指引',
-                'holder_ratio_weight': '股东持股',
-                'market_cap_weight': '市值权重',
-                'market_cap_exponent': '市值指数',
-            }
-
-            orig_params = {}
-            for key in param_keys:
-                orig_params[key] = getattr(self.main, BAYESIAN_TO_COEFFICIENT[key])
-
-            n_samples = 200
-            all_params = []
-            all_scores = []
-
-            for i in range(n_samples):
-                sample = {}
-                for key in param_keys:
-                    lo, hi = BAYESIAN_BOUNDS[key]
-                    sample[key] = random.uniform(lo, hi)
-                    setattr(self.main, BAYESIAN_TO_COEFFICIENT[key], sample[key])
-                all_params.append(sample)
-                score = self.main._optimization_backtest(self.start_str, self.end_str)
-                all_scores.append(score)
-                self.progress_signal.emit(int((i + 1) / n_samples * 100))
-
-            for key, val in orig_params.items():
-                setattr(self.main, BAYESIAN_TO_COEFFICIENT[key], val)
-
-            results = []
-            for key in param_keys:
-                x = [s[key] for s in all_params]
-                y = all_scores
-
-                r = self._calc_pearson(x, y)
-                mi = self._calc_mutual_info(x, y)
-                slope, intercept, r_squared = self._calc_linear_regression(x, y)
-                abs_r = abs(r)
-
-                if abs_r >= 0.5 and mi >= 0.3:
-                    if r_squared >= 0.25:
-                        judgment = '线性相关'
-                    else:
-                        judgment = '线性相关(拟合存疑)'
-                elif abs_r >= 0.3 and mi >= 0.3:
-                    judgment = '弱线性+非线性'
-                elif abs_r < 0.3 and mi >= 0.3:
-                    if r_squared >= 0.2:
-                        judgment = '非线性(含线性趋势)'
-                    else:
-                        judgment = '非线性相关'
-                elif abs_r >= 0.3 and mi < 0.3:
-                    if r_squared >= 0.1:
-                        judgment = '弱线性相关'
-                    else:
-                        judgment = '弱线性(拟合存疑)'
-                else:
-                    judgment = '弱相关'
-
-                results.append((key, display_names[key], r, abs_r, mi, slope, r_squared, judgment))
-
-            self.finished_signal.emit({'results': results})
-        except Exception as e:
-            self.error_signal.emit(str(e))
-            import traceback
-            traceback.print_exc()
-
+# 导入工具类和工作线程
+from utils import FlowLayout, NumericTableItem
+from workers import BayesianOptimizationThread, CorrelationAnalysisThread
 
 class StockMasterApp(QMainWindow):
     def __init__(self):
@@ -715,7 +48,11 @@ class StockMasterApp(QMainWindow):
         self.STOCK_WEIGHT_LAST = Coefficients.STOCK_WEIGHT_LAST
         self.BOARD_WEIGHT = Coefficients.BOARD_WEIGHT
         self.GEM_FACTOR = Coefficients.GEM_FACTOR  # 创业板系数
-        self.RUSHING_ATTR_WEIGHT = Coefficients.RUSHING_ATTR_WEIGHT
+        self.RUSH_ATTR_COEFFICIENT = Coefficients.RUSH_ATTR_COEFFICIENT
+        self.RUSH_PCT_COEFFICIENT = Coefficients.RUSH_PCT_COEFFICIENT
+        self.RUSH_LETTER_ATTR_WEIGHT = Coefficients.RUSH_LETTER_ATTR_WEIGHT
+        self.RUSH_REGION_ATTR_WEIGHT = Coefficients.RUSH_REGION_ATTR_WEIGHT
+        self.RUSH_MARKET_CAP_COEFFICIENT = Coefficients.RUSH_MARKET_CAP_COEFFICIENT
         self.YZ_OVERALL_WEIGHT = Coefficients.YZ_OVERALL_WEIGHT
         self.LETTER_ATTR_WEIGHT = Coefficients.LETTER_ATTR_WEIGHT
         self.REGION_ATTR_WEIGHT = Coefficients.REGION_ATTR_WEIGHT
@@ -733,6 +70,10 @@ class StockMasterApp(QMainWindow):
         self._gov_dynamic_active = False
         self._factor_enabled = {}  # param_key -> bool
         self._load_factor_governance()
+
+        # 从数据库加载 hexin-v
+        self.hexin_v = 'A9EiP0gFX-ulsrP_2NuA_x-U4NZuPkCv77TpxLM7z7-3AP8I-45VgH8C-Q5A'
+        self._load_hexin_v()
 
         # 保存得分详情数据
         self.score_details = {}
@@ -884,6 +225,13 @@ class StockMasterApp(QMainWindow):
         )
         ''')
 
+        # 迁移：清空旧版竞价抢筹属性数据（改为股票维度）
+        cursor.execute('SELECT COUNT(*) FROM bidding_rush_attrs')
+        old_count = cursor.fetchone()[0]
+        if old_count > 0:
+            cursor.execute('DELETE FROM bidding_rush_attrs')
+            print(f"Migration: cleared {old_count} old rush attr records from bidding_rush_attrs")
+
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS stock_ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -979,6 +327,7 @@ class StockMasterApp(QMainWindow):
             stock_weight_last REAL NOT NULL,
             board_weight REAL NOT NULL,
             rushing_weight REAL NOT NULL,
+            rush_pct_coefficient REAL NOT NULL DEFAULT 0.2,
             yz_overall_weight REAL NOT NULL DEFAULT 1.0,
             attr_count_weight REAL NOT NULL,
             negative_attr_count_weight REAL NOT NULL,
@@ -1010,7 +359,16 @@ class StockMasterApp(QMainWindow):
             
             if 'holder_ratio_weight' not in columns:
                 cursor.execute('ALTER TABLE backtest_results ADD COLUMN holder_ratio_weight REAL NOT NULL DEFAULT 0.1')
-                
+
+            if 'rush_letter_attr_weight' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN rush_letter_attr_weight REAL NOT NULL DEFAULT 0.02')
+
+            if 'rush_region_attr_weight' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN rush_region_attr_weight REAL NOT NULL DEFAULT 0.02')
+
+            if 'rush_market_cap_coefficient' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN rush_market_cap_coefficient REAL NOT NULL DEFAULT 0.01')
+
         except Exception as e:
             print(f"Error altering table: {e}")
 
@@ -1035,7 +393,7 @@ class StockMasterApp(QMainWindow):
                 'stock_weight_first': '非线性相关',
                 'stock_weight_last': '弱相关',
                 'board_weight': '非线性相关',
-                'rushing_attr_weight': '非线性相关',
+                'rush_attr_coefficient': '非线性相关',
                 'yz_overall_weight': '非线性相关',
                 'letter_attr_weight': '非线性相关',
                 'region_attr_weight': '非线性相关',
@@ -1064,6 +422,13 @@ class StockMasterApp(QMainWindow):
             enabled INTEGER NOT NULL DEFAULT 1,
             weight_scale REAL NOT NULL DEFAULT 1.0,
             updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
         ''')
 
@@ -1137,31 +502,25 @@ class StockMasterApp(QMainWindow):
         finally:
             conn.close()
 
-        # 清理已有竞价抢筹数据，确保每日期不超过 MAX_RUSH_ATTRS 条
-        try:
-            self._trim_all_rush_attrs(db_path)
-        except Exception as e:
-            print(f"Error trimming rush attrs: {e}")
-
         return db_path
 
     def _trim_all_rush_attrs(self, db_path=None):
         conn = sqlite3.connect(db_path or self.db_path)
         cursor = conn.cursor()
         try:
-            cursor.execute('SELECT DISTINCT date FROM bidding_rush_attrs')
+            cursor.execute('SELECT DISTINCT date FROM bidding_rush_stocks')
             dates = [row[0] for row in cursor.fetchall()]
             total_deleted = 0
             for date in dates:
-                cursor.execute('SELECT COUNT(*) FROM bidding_rush_attrs WHERE date = ?', (date,))
+                cursor.execute('SELECT COUNT(*) FROM bidding_rush_stocks WHERE date = ?', (date,))
                 count = cursor.fetchone()[0]
                 if count > MAX_RUSH_ATTRS:
                     cursor.execute('''
-                        DELETE FROM bidding_rush_attrs
+                        DELETE FROM bidding_rush_stocks
                         WHERE date = ? AND id NOT IN (
-                            SELECT id FROM bidding_rush_attrs
+                            SELECT id FROM bidding_rush_stocks
                             WHERE date = ?
-                            ORDER BY intensity DESC
+                            ORDER BY pct_change DESC
                             LIMIT ?
                         )
                     ''', (date, date, MAX_RUSH_ATTRS))
@@ -1218,6 +577,28 @@ class StockMasterApp(QMainWindow):
         self.get_market_cap_btn = QPushButton('获取股票总市值')
         self.get_market_cap_btn.clicked.connect(self.get_total_market_cap_data)
         stock_info_layout.addWidget(self.get_market_cap_btn)
+
+        self.refresh_attr_btn = QPushButton('刷新属性')
+        self.refresh_attr_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #17a2b8; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 5px 15px;
+            }
+            QPushButton:hover { background-color: #138496; }
+        ''')
+        self.refresh_attr_btn.clicked.connect(self.refresh_stock_attributes)
+        stock_info_layout.addWidget(self.refresh_attr_btn)
+
+        self.delete_stock_btn = QPushButton('删除股票')
+        self.delete_stock_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #dc3545; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 5px 15px;
+            }
+            QPushButton:hover { background-color: #c82333; }
+        ''')
+        self.delete_stock_btn.clicked.connect(self.delete_stocks)
+        stock_info_layout.addWidget(self.delete_stock_btn)
 
         layout.addLayout(stock_info_layout)
 
@@ -3142,11 +2523,14 @@ class StockMasterApp(QMainWindow):
         
         # 历史结果表格
         self.bayesian_history_table = QTableWidget()
-        self.bayesian_history_table.setColumnCount(18)
+        self.bayesian_history_table.setColumnCount(24)
         self.bayesian_history_table.setHorizontalHeaderLabels([
-            '日期', '训练集得分', '验证集得分', '训练集范围', '验证集范围', '首股票权重', '末股票权重', 
-            '每板权重', '竞价权重', '一字板权重', '属性数量权重', '负反馈数量权重', '负反馈整体权重', 
-            '节点指引', '同板压制', '股东持股权重', '市值权重', '市值指数'
+            '日期', '训练集得分', '验证集得分', '训练集范围', '验证集范围',
+            '首股票权重', '末股票权重', '每板权重',
+            '抢筹属性a', '涨幅系数b', '抢筹字母', '抢筹地区', '抢筹市值',
+            '一字板', '字母属性', '地区属性',
+            '属性数量', '负反馈数量', '负反馈整体',
+            '节点指引', '同板压制', '股东持股', '市值权重', '市值指数'
         ])
         self.bayesian_history_table.setMaximumHeight(200)
         self.bayesian_history_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -3220,16 +2604,22 @@ class StockMasterApp(QMainWindow):
                 self.bayesian_history_table.setItem(row, 5, QTableWidgetItem(f'{params.get("stock_weight_first", 0.0):.4f}'))
                 self.bayesian_history_table.setItem(row, 6, QTableWidgetItem(f'{params.get("stock_weight_last", 0.0):.4f}'))
                 self.bayesian_history_table.setItem(row, 7, QTableWidgetItem(f'{params.get("board_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 8, QTableWidgetItem(f'{params.get("rushing_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 9, QTableWidgetItem(f'{params.get("yz_overall_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 10, QTableWidgetItem(f'{params.get("attr_count_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 11, QTableWidgetItem(f'{params.get("negative_attr_count_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 12, QTableWidgetItem(f'{params.get("negative_overall_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 13, QTableWidgetItem(f'{params.get("node_guide_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 14, QTableWidgetItem(f'{params.get("board_press_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 15, QTableWidgetItem(f'{params.get("holder_ratio_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 16, QTableWidgetItem(f'{params.get("market_cap_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 17, QTableWidgetItem(f'{params.get("market_cap_exponent", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 8, QTableWidgetItem(f'{params.get("rush_attr_coefficient", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 9, QTableWidgetItem(f'{params.get("rush_pct_coefficient", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 10, QTableWidgetItem(f'{params.get("rush_letter_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 11, QTableWidgetItem(f'{params.get("rush_region_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 12, QTableWidgetItem(f'{params.get("rush_market_cap_coefficient", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 13, QTableWidgetItem(f'{params.get("yz_overall_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 14, QTableWidgetItem(f'{params.get("letter_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 15, QTableWidgetItem(f'{params.get("region_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 16, QTableWidgetItem(f'{params.get("attr_count_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 17, QTableWidgetItem(f'{params.get("negative_attr_count_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 18, QTableWidgetItem(f'{params.get("negative_overall_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 19, QTableWidgetItem(f'{params.get("node_guide_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 20, QTableWidgetItem(f'{params.get("board_press_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 21, QTableWidgetItem(f'{params.get("holder_ratio_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 22, QTableWidgetItem(f'{params.get("market_cap_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 23, QTableWidgetItem(f'{params.get("market_cap_exponent", 0.0):.4f}'))
             
             self.bayesian_history_table.resizeColumnsToContents()
         finally:
@@ -3270,7 +2660,11 @@ class StockMasterApp(QMainWindow):
             self.STOCK_WEIGHT_FIRST = params.get('stock_weight_first', self.STOCK_WEIGHT_FIRST)
             self.STOCK_WEIGHT_LAST = params.get('stock_weight_last', self.STOCK_WEIGHT_LAST)
             self.BOARD_WEIGHT = params.get('board_weight', self.BOARD_WEIGHT)
-            self.RUSHING_ATTR_WEIGHT = params.get('rushing_attr_weight', self.RUSHING_ATTR_WEIGHT)
+            self.RUSH_ATTR_COEFFICIENT = params.get('rush_attr_coefficient', self.RUSH_ATTR_COEFFICIENT)
+            self.RUSH_PCT_COEFFICIENT = params.get('rush_pct_coefficient', self.RUSH_PCT_COEFFICIENT)
+            self.RUSH_LETTER_ATTR_WEIGHT = params.get('rush_letter_attr_weight', self.RUSH_LETTER_ATTR_WEIGHT)
+            self.RUSH_REGION_ATTR_WEIGHT = params.get('rush_region_attr_weight', self.RUSH_REGION_ATTR_WEIGHT)
+            self.RUSH_MARKET_CAP_COEFFICIENT = params.get('rush_market_cap_coefficient', self.RUSH_MARKET_CAP_COEFFICIENT)
             self.YZ_OVERALL_WEIGHT = params.get('yz_overall_weight', self.YZ_OVERALL_WEIGHT)
             self.LETTER_ATTR_WEIGHT = params.get('letter_attr_weight', self.LETTER_ATTR_WEIGHT)
             self.REGION_ATTR_WEIGHT = params.get('region_attr_weight', self.REGION_ATTR_WEIGHT)
@@ -3290,7 +2684,11 @@ class StockMasterApp(QMainWindow):
             Coefficients.STOCK_WEIGHT_FIRST = self.STOCK_WEIGHT_FIRST
             Coefficients.STOCK_WEIGHT_LAST = self.STOCK_WEIGHT_LAST
             Coefficients.BOARD_WEIGHT = self.BOARD_WEIGHT
-            Coefficients.RUSHING_ATTR_WEIGHT = self.RUSHING_ATTR_WEIGHT
+            Coefficients.RUSH_ATTR_COEFFICIENT = self.RUSH_ATTR_COEFFICIENT
+            Coefficients.RUSH_PCT_COEFFICIENT = self.RUSH_PCT_COEFFICIENT
+            Coefficients.RUSH_LETTER_ATTR_WEIGHT = self.RUSH_LETTER_ATTR_WEIGHT
+            Coefficients.RUSH_REGION_ATTR_WEIGHT = self.RUSH_REGION_ATTR_WEIGHT
+            Coefficients.RUSH_MARKET_CAP_COEFFICIENT = self.RUSH_MARKET_CAP_COEFFICIENT
             Coefficients.YZ_OVERALL_WEIGHT = self.YZ_OVERALL_WEIGHT
             Coefficients.LETTER_ATTR_WEIGHT = self.LETTER_ATTR_WEIGHT
             Coefficients.REGION_ATTR_WEIGHT = self.REGION_ATTR_WEIGHT
@@ -3403,6 +2801,29 @@ class StockMasterApp(QMainWindow):
         
         additive_input.returnPressed.connect(handle_additive_input)
         additive_input_layout.addWidget(additive_input)
+
+        yz_fetch_btn = QPushButton('一键获取')
+        yz_fetch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #fd7e14; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #e06b0d; }
+        ''')
+        yz_fetch_btn.clicked.connect(self.fetch_yiziban_stocks)
+        additive_input_layout.addWidget(yz_fetch_btn)
+
+        yz_batch_btn = QPushButton('批量获取')
+        yz_batch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6f42c1; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #5a32a3; }
+        ''')
+        yz_batch_btn.clicked.connect(self.batch_fetch_yiziban_stocks)
+        additive_input_layout.addWidget(yz_batch_btn)
+
         additive_input_layout.addStretch()
         additive_group.addLayout(additive_input_layout)
         self.additive_records_table = QTableWidget()
@@ -3415,64 +2836,184 @@ class StockMasterApp(QMainWindow):
         # 中间：竞价抢筹
         rushing_group = QVBoxLayout()
         rushing_group.addWidget(QLabel('竞价抢筹'))
-        
-        # 竞价抢筹快速输入框
+
+        # 竞价抢筹快速输入框（两个输入栏：股票 + 涨幅）
         rushing_input_layout = QHBoxLayout()
-        rushing_input = QLineEdit()
-        rushing_input.setPlaceholderText('输入属性名 爆量倍数回车添加')
-        rushing_input.setMaximumWidth(250)
-        rushing_input.setStyleSheet('''
+        rushing_stock_input = QLineEdit()
+        rushing_stock_input.setPlaceholderText('输入股票名称或代码')
+        rushing_stock_input.setMaximumWidth(200)
+        rushing_stock_input.setStyleSheet('''
             background-color: #f8f9fa;
             border: 1px solid #ced4da;
             border-radius: 3px;
             padding: 2px 5px;
             font-size: 12px;
         ''')
-        
+
+        rushing_pct_input = QDoubleSpinBox()
+        rushing_pct_input.setRange(-50.0, 99.9)
+        rushing_pct_input.setDecimals(2)
+        rushing_pct_input.setValue(5.0)
+        rushing_pct_input.setSuffix(' %')
+        rushing_pct_input.setSingleStep(0.5)
+        rushing_pct_input.setMaximumWidth(120)
+        rushing_pct_input.setStyleSheet('font-size: 12px;')
+
         def handle_rushing_input():
-            text = rushing_input.text().strip()
+            text = rushing_stock_input.text().strip()
             if not text:
                 return
-            parts = text.split()
-            if len(parts) < 2:
-                QMessageBox.warning(self, '提示', '格式错误，请使用：属性名 爆量倍数')
-                return
-            attr_name = ' '.join(parts[:-1])
-            try:
-                intensity = float(parts[-1])
-            except ValueError:
-                QMessageBox.warning(self, '提示', '爆量倍数格式错误')
-                return
-            date = self.bidding_date.date().toString('yyyy-MM-dd')
+            stock_input = text
+            pct_change = rushing_pct_input.value()
+
+            # 搜索股票
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
+            stock = None
             try:
-                cursor.execute('INSERT OR REPLACE INTO bidding_rush_attrs (date, attribute, intensity) VALUES (?, ?, ?)',
-                              (date, attr_name, intensity))
+                cursor.execute('SELECT id, code, name FROM stocks WHERE code = ?', (stock_input,))
+                stock = cursor.fetchone()
+                if not stock:
+                    cursor.execute('SELECT id, code, name FROM stocks WHERE name LIKE ?', (f'%{stock_input}%',))
+                    stock = cursor.fetchone()
+            finally:
+                if stock is None:
+                    conn.close()
+                    QMessageBox.warning(self, '提示', f'未找到股票: {stock_input}')
+                    return
+
+            stock_id, code, name = stock
+            date = self.bidding_date.date().toString('yyyy-MM-dd')
+            try:
+                cursor.execute('SELECT id FROM bidding_rush_stocks WHERE date = ? AND stock_id = ?', (date, stock_id))
+                if cursor.fetchone():
+                    cursor.execute('UPDATE bidding_rush_stocks SET pct_change = ? WHERE date = ? AND stock_id = ?',
+                                  (pct_change, date, stock_id))
+                else:
+                    cursor.execute('INSERT INTO bidding_rush_stocks (date, stock_id, pct_change) VALUES (?, ?, ?)',
+                                  (date, stock_id, pct_change))
                 conn.commit()
                 self.load_bidding_records()
             except Exception as e:
-                print(f"Error adding rush attr: {e}")
+                print(f"Error adding rush stock: {e}")
             finally:
                 conn.close()
-            rushing_input.clear()
-            rushing_input.setFocus()
-        
-        rushing_input.returnPressed.connect(handle_rushing_input)
-        rushing_input_layout.addWidget(rushing_input)
-        
+            rushing_stock_input.clear()
+            rushing_pct_input.setValue(5.0)
+            rushing_stock_input.setFocus()
+
+        rushing_stock_input.returnPressed.connect(handle_rushing_input)
+        rushing_input_layout.addWidget(rushing_stock_input)
+        rushing_input_layout.addWidget(rushing_pct_input)
+
+        add_rush_btn = QPushButton('添加')
+        add_rush_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #28a745; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #218838; }
+        ''')
+        add_rush_btn.clicked.connect(handle_rushing_input)
+        rushing_input_layout.addWidget(add_rush_btn)
+
         rush_import_btn = QPushButton('批量导入')
         rush_import_btn.clicked.connect(self.show_rush_attr_batch_import_dialog)
         rushing_input_layout.addWidget(rush_import_btn)
+
+        rush_fetch_btn = QPushButton('获取早盘竞价')
+        rush_fetch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #fd7e14; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #e06b0d; }
+        ''')
+        rush_fetch_btn.clicked.connect(self.fetch_morning_rush_stocks)
+        rushing_input_layout.addWidget(rush_fetch_btn)
+
+        batch_fetch_btn = QPushButton('批量获取')
+        batch_fetch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6f42c1; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #5a32a3; }
+        ''')
+        batch_fetch_btn.clicked.connect(self.batch_fetch_morning_rush_stocks)
+        rushing_input_layout.addWidget(batch_fetch_btn)
+
+        rush_clear_btn = QPushButton('一键清除')
+        rush_clear_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #dc3545; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #c82333; }
+        ''')
+        rush_clear_btn.clicked.connect(self.clear_rush_stocks)
+        rushing_input_layout.addWidget(rush_clear_btn)
+
         rushing_input_layout.addStretch()
         rushing_group.addLayout(rushing_input_layout)
-        
+
         self.rushing_attrs_table = QTableWidget()
-        self.rushing_attrs_table.setColumnCount(4)
-        self.rushing_attrs_table.setHorizontalHeaderLabels(['属性', '爆量倍数', '添加时间', '操作'])
+        self.rushing_attrs_table.setColumnCount(5)
+        self.rushing_attrs_table.setHorizontalHeaderLabels(['代码', '名称', '涨幅%', '添加时间', '操作'])
         self.rushing_attrs_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.rushing_attrs_table.cellChanged.connect(self.on_rush_attr_intensity_changed)
         rushing_group.addWidget(self.rushing_attrs_table)
+
+        # 全量操作按钮
+        mega_batch_layout = QHBoxLayout()
+        onekey_btn = QPushButton('一键获取全部')
+        onekey_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #17a2b8; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 6px 16px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #138496; }
+        ''')
+        onekey_btn.clicked.connect(self.onekey_fetch_all_bidding)
+        mega_batch_layout.addWidget(onekey_btn)
+
+        mega_batch_btn = QPushButton('全量批量获取')
+        mega_batch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #e83e8c; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 6px 20px;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #c2185b; }
+        ''')
+        mega_batch_btn.clicked.connect(self.mega_batch_fetch)
+        mega_batch_layout.addWidget(mega_batch_btn)
+        mega_batch_layout.addStretch()
+        rushing_group.addLayout(mega_batch_layout)
+
+        # hexin-v 令牌配置
+        hexin_layout = QHBoxLayout()
+        hexin_layout.addWidget(QLabel('hexin-v:'))
+        self.hexin_v_input = QLineEdit()
+        self.hexin_v_input.setPlaceholderText('输入hexin-v令牌')
+        self.hexin_v_input.setText(self.hexin_v)
+        self.hexin_v_input.setMaximumWidth(400)
+        self.hexin_v_input.setStyleSheet('font-size: 11px;')
+        hexin_layout.addWidget(self.hexin_v_input)
+        hexin_save_btn = QPushButton('更新')
+        hexin_save_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6c757d; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 2px 10px;
+            }
+            QPushButton:hover { background-color: #5a6268; }
+        ''')
+        hexin_save_btn.clicked.connect(self._save_hexin_v_from_ui)
+        hexin_layout.addWidget(hexin_save_btn)
+        hexin_layout.addStretch()
+        rushing_group.addLayout(hexin_layout)
+
         records_layout.addLayout(rushing_group)
         
         # 右侧：竞价负反馈
@@ -3547,6 +3088,29 @@ class StockMasterApp(QMainWindow):
         
         subtractive_input.returnPressed.connect(handle_subtractive_input)
         subtractive_input_layout.addWidget(subtractive_input)
+
+        ff_fetch_btn = QPushButton('一键获取')
+        ff_fetch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #fd7e14; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #e06b0d; }
+        ''')
+        ff_fetch_btn.clicked.connect(self.fetch_negative_stocks)
+        subtractive_input_layout.addWidget(ff_fetch_btn)
+
+        ff_batch_btn = QPushButton('批量获取')
+        ff_batch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6f42c1; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #5a32a3; }
+        ''')
+        ff_batch_btn.clicked.connect(self.batch_fetch_negative_stocks)
+        subtractive_input_layout.addWidget(ff_batch_btn)
+
         subtractive_input_layout.addStretch()
         subtractive_group.addLayout(subtractive_input_layout)
         
@@ -3575,7 +3139,7 @@ class StockMasterApp(QMainWindow):
         rushing_analysis_group.addWidget(QLabel('竞价抢筹属性'))
         self.rushing_analysis_result = QTableWidget()
         self.rushing_analysis_result.setColumnCount(2)
-        self.rushing_analysis_result.setHorizontalHeaderLabels(['属性', '爆量倍数'])
+        self.rushing_analysis_result.setHorizontalHeaderLabels(['属性', '出现次数'])
         rushing_analysis_group.addWidget(self.rushing_analysis_result)
         analysis_layout.addLayout(rushing_analysis_group)
         
@@ -3751,6 +3315,17 @@ class StockMasterApp(QMainWindow):
         self.auto_get_limit_up_btn = QPushButton('自动获取涨停数据')
         self.auto_get_limit_up_btn.clicked.connect(self.auto_get_limit_up_data)
         top_layout.addWidget(self.auto_get_limit_up_btn)
+
+        batch_limit_up_btn = QPushButton('批量获取')
+        batch_limit_up_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6f42c1; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 5px 15px;
+            }
+            QPushButton:hover { background-color: #5a32a3; }
+        ''')
+        batch_limit_up_btn.clicked.connect(self.batch_fetch_limit_up_data)
+        top_layout.addWidget(batch_limit_up_btn)
 
         self.summary_attr_btn = QPushButton('总结')
         self.summary_attr_btn.setStyleSheet('''
@@ -5423,7 +4998,10 @@ class StockMasterApp(QMainWindow):
   属性得分总和 = 一字板属性得分 / NORM_YZ_SCORE（已含一字板系数）
                + 字母属性得分 / NORM_YZ_SCORE（已含字母属性系数）
                + 地区属性得分 / NORM_REGION_SCORE（已含地区属性系数）
-               + 抢筹属性得分 = 属性爆量倍数 / NORM_RUSHING_INTENSITY × 竞价抢筹属性权重
+               + 抢筹属性得分 = 抢筹字母属性得分 + 抢筹地区属性得分 + 抢筹其他属性得分
+                抢筹字母属性得分 = sum(涨幅 × b) × 抢筹字母属性系数
+                抢筹地区属性得分 = sum(涨幅 × b) × 抢筹地区属性系数
+                抢筹其他属性得分 = sum(涨幅 × b) × 抢筹其他属性总系数
                - 负反馈属性得分 / NORM_FF_SCORE（已含负反馈整体系数）
   股东持股比例得分 = 持股比例 / NORM_HOLDER_RATIO × 股东持股权重
   市值得分 = (市值(亿) / NORM_MARKET_CAP) ^ MARKET_CAP_EXPONENT × 市值权重系数
@@ -5442,7 +5020,11 @@ class StockMasterApp(QMainWindow):
 - 股东持股权重 (HOLDER_RATIO_WEIGHT) = {holder_ratio_weight:.2f}
 - 市值权重 (MARKET_CAP_WEIGHT) = {market_cap_weight:.4f}
 - 市值指数 (MARKET_CAP_EXPONENT) = {market_cap_exponent:.4f}
-- 竞价抢筹属性权重 (RUSHING_ATTR_WEIGHT) = {rushing_attr_weight:.4f}
+- 抢筹-其他属性总系数 (RUSH_ATTR_COEFFICIENT) = {rush_attr_coeff:.4f}
+	- 抢筹-字母属性系数 (RUSH_LETTER_ATTR_WEIGHT) = {rush_letter_attr_coeff:.4f}
+	- 抢筹-地区属性系数 (RUSH_REGION_ATTR_WEIGHT) = {rush_region_attr_coeff:.4f}
+	- 抢筹市值系数 (RUSH_MARKET_CAP_COEFFICIENT) = {rush_market_cap_coeff:.4f}
+	- 涨幅系数 b (RUSH_PCT_COEFFICIENT) = {rush_pct_coeff:.4f}
 - 一字板权重 (YZ_OVERALL_WEIGHT) = {yz_overall_weight:.2f}
 - 字母属性权重 (LETTER_ATTR_WEIGHT) = {letter_attr_weight:.2f}
 - 地区属性权重 (REGION_ATTR_WEIGHT) = {region_attr_weight:.2f}
@@ -5457,7 +5039,6 @@ class StockMasterApp(QMainWindow):
 - NORM_BOARD_COUNT = {norm_board:.0f}
 - NORM_HOLDER_RATIO = {norm_holder:.0f}
 - NORM_MARKET_CAP = {norm_market_cap:.0f}
-- NORM_RUSHING_INTENSITY = {norm_rush_intensity:.0f}
 - NORM_BOARD_PRESS = {norm_bp:.0f}
 - NORM_NODE_GUIDE = {norm_ng:.0f}
 - NORM_REGION_SCORE = {norm_region:.0f}
@@ -5468,7 +5049,11 @@ class StockMasterApp(QMainWindow):
     holder_ratio_weight=self.HOLDER_RATIO_WEIGHT,
     market_cap_weight=self.MARKET_CAP_WEIGHT,
     market_cap_exponent=self.MARKET_CAP_EXPONENT,
-    rushing_attr_weight=self.RUSHING_ATTR_WEIGHT,
+    rush_attr_coeff=self.RUSH_ATTR_COEFFICIENT,
+    rush_pct_coeff=self.RUSH_PCT_COEFFICIENT,
+    rush_letter_attr_coeff=self.RUSH_LETTER_ATTR_WEIGHT,
+    rush_region_attr_coeff=self.RUSH_REGION_ATTR_WEIGHT,
+    rush_market_cap_coeff=self.RUSH_MARKET_CAP_COEFFICIENT,
     yz_overall_weight=self.YZ_OVERALL_WEIGHT,
     letter_attr_weight=self.LETTER_ATTR_WEIGHT,
     region_attr_weight=self.REGION_ATTR_WEIGHT,
@@ -5481,7 +5066,6 @@ class StockMasterApp(QMainWindow):
     norm_board=NORM_BOARD_COUNT,
     norm_holder=NORM_HOLDER_RATIO,
     norm_market_cap=NORM_MARKET_CAP,
-    norm_rush_intensity=NORM_RUSHING_INTENSITY,
     norm_bp=NORM_BOARD_PRESS,
     norm_ng=NORM_NODE_GUIDE,
     norm_region=NORM_REGION_SCORE,
@@ -5532,7 +5116,7 @@ class StockMasterApp(QMainWindow):
             rows = [
                 ('股票代码', code),
                 ('股票名称', details['name']),
-                ('竞价抢筹匹配数', str(len(details.get('matching_attrs_qc', [])))),
+                ('竞价抢筹匹配数', str(len(details.get('matching_attrs_qc', [])) + len(details.get('matching_attrs_qc_letter', [])) + len(details.get('matching_attrs_qc_region', [])))),
                 ('', ''),
                 ('=== 竞价一字板属性 ===', ''),
             ]
@@ -5568,9 +5152,31 @@ class StockMasterApp(QMainWindow):
                 rows.append((f'  {attr}', f'{attr_score:.4f}'))
 
             rows.append(('', ''))
-            rows.append(('=== 竞价抢筹属性 ===', ''))
+            rows.append(('=== 竞价抢筹-字母属性 ===', ''))
 
-            # 竞价抢筹属性得分
+            # 竞价抢筹-字母属性得分
+            attr_scores_qc_letter = details.get('attr_scores_qc_letter', {})
+            matching_attrs_qc_letter = details.get('matching_attrs_qc_letter', [])
+
+            for attr in matching_attrs_qc_letter:
+                attr_score = attr_scores_qc_letter.get(attr, 0)
+                rows.append((f'  {attr}', f'{attr_score:.4f}'))
+
+            rows.append(('', ''))
+            rows.append(('=== 竞价抢筹-地区属性 ===', ''))
+
+            # 竞价抢筹-地区属性得分
+            attr_scores_qc_region = details.get('attr_scores_qc_region', {})
+            matching_attrs_qc_region = details.get('matching_attrs_qc_region', [])
+
+            for attr in matching_attrs_qc_region:
+                attr_score = attr_scores_qc_region.get(attr, 0)
+                rows.append((f'  {attr}', f'{attr_score:.4f}'))
+
+            rows.append(('', ''))
+            rows.append(('=== 竞价抢筹-其他属性 ===', ''))
+
+            # 竞价抢筹-其他属性得分
             attr_scores_qc = details.get('attr_scores_qc', {})
             matching_attrs_qc = details.get('matching_attrs_qc', [])
 
@@ -5597,13 +5203,16 @@ class StockMasterApp(QMainWindow):
             yz_total = sum(details.get('attr_scores_yz', {}).values())
             letter_total = sum(details.get('attr_scores_letter', {}).values())
             region_total = sum(details.get('attr_scores_region', {}).values())
-            qc_total = sum(details.get('attr_scores_qc', {}).values())
+            qc_letter_total = sum(details.get('attr_scores_qc_letter', {}).values())
+            qc_region_total = sum(details.get('attr_scores_qc_region', {}).values())
+            qc_other_total = sum(details.get('attr_scores_qc', {}).values())
+            qc_total = qc_letter_total + qc_region_total + qc_other_total
             ff_total = sum(details.get('attr_scores_ff', {}).values())
             
             rows.append(('', ''))
             rows.append(('=== 属性得分汇总 ===', ''))
             rows.append(('  属性得分总和', f"{attr_total_score:.4f}"))
-            rows.append(('    = 一字板({:.4f}) + 字母({:.4f}) + 地区({:.4f}) + 抢筹({:.4f}) + 负反馈({:.4f})'.format(yz_total, letter_total, region_total, qc_total, ff_total), ''))
+            rows.append(('    = 一字板({:.4f}) + 字母({:.4f}) + 地区({:.4f}) + 抢筹字母({:.4f}) + 抢筹地区({:.4f}) + 抢筹其他({:.4f}) + 负反馈({:.4f})'.format(yz_total, letter_total, region_total, qc_letter_total, qc_region_total, qc_other_total, ff_total), ''))
             
             # 股东持股比例得分
             rows.append(('', ''))
@@ -5772,7 +5381,11 @@ class StockMasterApp(QMainWindow):
                 for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                                     ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                                     ('board_weight', 'BOARD_WEIGHT'),
-                                    ('rushing_attr_weight', 'RUSHING_ATTR_WEIGHT'),
+                                    ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+                            ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
+                                ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
+                                ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
+                                ('rush_market_cap_coefficient', 'RUSH_MARKET_CAP_COEFFICIENT'),
                                     ('yz_overall_weight', 'YZ_OVERALL_WEIGHT'),
                                     ('letter_attr_weight', 'LETTER_ATTR_WEIGHT'),
                                     ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
@@ -5804,7 +5417,9 @@ class StockMasterApp(QMainWindow):
                 attr_weighted_count_yz = {}  # 一字板属性得分
                 attr_weighted_count_letter = {}  # 字母属性得分（拼音首字母）
                 attr_weighted_count_region = {}  # 地区属性得分（如浙江、江苏等）
-                attr_weighted_count_qc = {}  # 抢筹属性得分（从 bidding_rush_attrs 读取）
+                attr_weighted_count_qc = {}  # 抢筹其他属性得分
+                attr_weighted_count_qc_letter = {}  # 抢筹字母属性得分
+                attr_weighted_count_qc_region = {}  # 抢筹地区属性得分
                 attr_weighted_count_ff = {}  # 负反馈属性得分
                 
                 # 按股票分组
@@ -5879,29 +5494,53 @@ class StockMasterApp(QMainWindow):
                         attr_weighted_count[attr] += ff_score
                         attr_weighted_count_ff[attr] += ff_score
 
-                # 读取竞价抢筹属性（从新表），直接使用爆量倍数 × 系数作为得分
+                # 读取竞价抢筹股票，按其属性加权计算抢筹得分
                 cursor.execute('''
-                    SELECT attribute, intensity
-                    FROM bidding_rush_attrs
-                    WHERE date = ?
+                    SELECT brs.pct_change, s.id, s.total_market_cap
+                    FROM bidding_rush_stocks brs
+                    JOIN stocks s ON brs.stock_id = s.id
+                    WHERE brs.date = ?
+                    ORDER BY brs.pct_change DESC
                 ''', (today_str,))
-                rush_attr_records = cursor.fetchall()
-                for attr, intensity in rush_attr_records:
-                    if attr not in attr_weighted_count_qc:
-                        attr_weighted_count_qc[attr] = 0
-                    if attr not in attr_weighted_count:
-                        attr_weighted_count[attr] = 0
-                    rush_score = intensity / NORM_RUSHING_INTENSITY * self.RUSHING_ATTR_WEIGHT
-                    attr_weighted_count_qc[attr] += rush_score
-                    attr_weighted_count[attr] += rush_score
+                rush_stock_data = cursor.fetchall()
+                for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
+                    # 获取该抢筹股票的属性
+                    cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+                    for row in cursor.fetchall():
+                        attr = row[0]
+                        if attr in ATTR_REMOVE_SET:
+                            continue
+                        # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
+                        market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
+                        rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
+                        if attr not in attr_weighted_count:
+                            attr_weighted_count[attr] = 0
+                        attr_weighted_count[attr] += rush_score_base
+                        if len(attr) == 1 and attr.isalpha():
+                            # 字母属性
+                            if attr not in attr_weighted_count_qc_letter:
+                                attr_weighted_count_qc_letter[attr] = 0
+                            attr_weighted_count_qc_letter[attr] += rush_score_base
+                        elif attr in REGION_NAMES:
+                            # 地区属性
+                            if attr not in attr_weighted_count_qc_region:
+                                attr_weighted_count_qc_region[attr] = 0
+                            attr_weighted_count_qc_region[attr] += rush_score_base
+                        else:
+                            # 其他属性
+                            if attr not in attr_weighted_count_qc:
+                                attr_weighted_count_qc[attr] = 0
+                            attr_weighted_count_qc[attr] += rush_score_base
 
                 # 打印属性得分，用于调试
                 print("Attribute scores:")
                 for attr, score in attr_weighted_count.items():
                     yz_score = attr_weighted_count_yz.get(attr, 0)
                     qc_score = attr_weighted_count_qc.get(attr, 0)
+                    qc_letter_score = attr_weighted_count_qc_letter.get(attr, 0)
+                    qc_region_score = attr_weighted_count_qc_region.get(attr, 0)
                     ff_score = attr_weighted_count_ff.get(attr, 0)
-                    print(f"  {attr}: total={score:.2f} (yz={yz_score:.2f}, qc={qc_score:.2f}, ff={ff_score:.2f})")
+                    print(f"  {attr}: total={score:.2f} (yz={yz_score:.2f}, qc_letter={qc_letter_score:.4f}, qc_region={qc_region_score:.4f}, qc_other={qc_score:.4f}, ff={ff_score:.2f})")
                 
                 # 计算每个属性的出现次数（分别计算加分和减分）
                 attr_additive_counts = {}
@@ -5949,9 +5588,13 @@ class StockMasterApp(QMainWindow):
                     if attr in attr_weighted_count_region:
                         attr_weighted_count_region[attr] *= self.REGION_ATTR_WEIGHT
                     
-                    # 应用到抢筹属性得分字典 - 抢筹得分已经直接由爆量倍数×系数计算，不再做二次缩放
+                    # 应用到抢筹属性得分字典 - 按分类应用各自的属性系数
+                    if attr in attr_weighted_count_qc_letter:
+                        attr_weighted_count_qc_letter[attr] *= self.RUSH_LETTER_ATTR_WEIGHT
+                    if attr in attr_weighted_count_qc_region:
+                        attr_weighted_count_qc_region[attr] *= self.RUSH_REGION_ATTR_WEIGHT
                     if attr in attr_weighted_count_qc:
-                        pass
+                        attr_weighted_count_qc[attr] *= self.RUSH_ATTR_COEFFICIENT
                     
                     # 应用到负反馈属性得分字典 - 只应用negative_count_factor，保持负号
                     if attr in attr_weighted_count_ff:
@@ -6242,14 +5885,18 @@ class StockMasterApp(QMainWindow):
                     matching_attrs_yz = []  # 一字板匹配属性
                     matching_attrs_letter = []  # 字母属性匹配
                     matching_attrs_region = []  # 地区属性匹配
-                    matching_attrs_qc = []  # 抢筹匹配属性
+                    matching_attrs_qc = []  # 抢筹其他属性匹配
+                    matching_attrs_qc_letter = []  # 抢筹字母属性匹配
+                    matching_attrs_qc_region = []  # 抢筹地区属性匹配
                     matching_attrs_ff = []  # 负反馈匹配属性
                     negative_attrs = []
                     attr_total = 0  # 属性得分总和
                     attr_scores_yz = {}  # 一字板属性得分
                     attr_scores_letter = {}  # 字母属性得分
                     attr_scores_region = {}  # 地区属性得分
-                    attr_scores_qc = {}  # 抢筹属性得分
+                    attr_scores_qc = {}  # 抢筹其他属性得分
+                    attr_scores_qc_letter = {}  # 抢筹字母属性得分
+                    attr_scores_qc_region = {}  # 抢筹地区属性得分
                     attr_scores_ff = {}  # 负反馈属性得分
                     for attr in stock_attrs:
                         if attr in attr_weighted_count_yz and attr in attr_weighted_count:
@@ -6267,6 +5914,16 @@ class StockMasterApp(QMainWindow):
                             attr_total += attr_score
                             matching_attrs_region.append(attr)
                             attr_scores_region[attr] = attr_score
+                        if attr in attr_weighted_count_qc_letter and attr in attr_weighted_count:
+                            attr_score = attr_weighted_count_qc_letter[attr]
+                            attr_total += attr_score
+                            matching_attrs_qc_letter.append(attr)
+                            attr_scores_qc_letter[attr] = attr_score
+                        if attr in attr_weighted_count_qc_region and attr in attr_weighted_count:
+                            attr_score = attr_weighted_count_qc_region[attr]
+                            attr_total += attr_score
+                            matching_attrs_qc_region.append(attr)
+                            attr_scores_qc_region[attr] = attr_score
                         if attr in attr_weighted_count_qc and attr in attr_weighted_count:
                             attr_score = attr_weighted_count_qc[attr]
                             attr_total += attr_score
@@ -6348,11 +6005,15 @@ class StockMasterApp(QMainWindow):
                         'attr_scores_letter': attr_scores_letter,
                         'attr_scores_region': attr_scores_region,
                         'attr_scores_qc': attr_scores_qc,
+                        'attr_scores_qc_letter': attr_scores_qc_letter,
+                        'attr_scores_qc_region': attr_scores_qc_region,
                         'attr_scores_ff': attr_scores_ff,
                         'matching_attrs_yz': matching_attrs_yz,
                         'matching_attrs_letter': matching_attrs_letter,
                         'matching_attrs_region': matching_attrs_region,
                         'matching_attrs_qc': matching_attrs_qc,
+                        'matching_attrs_qc_letter': matching_attrs_qc_letter,
+                        'matching_attrs_qc_region': matching_attrs_qc_region,
                         'matching_attrs_ff': matching_attrs_ff,
                         'negative_attrs': negative_attrs,
                         'board_count': board_count,
@@ -6373,7 +6034,7 @@ class StockMasterApp(QMainWindow):
                     }
 
                     if score > 0:
-                        scores.append((code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_qc, matching_attrs_ff, negative_attrs, is_rushing, node_level))
+                        scores.append((code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_region, matching_attrs_qc, matching_attrs_qc_letter, matching_attrs_qc_region, matching_attrs_ff, negative_attrs, is_rushing, node_level))
 
                 print(f"Scores with matches: {len(scores)}")
 
@@ -6381,7 +6042,7 @@ class StockMasterApp(QMainWindow):
 
                 self.correlation_result.setSortingEnabled(False)
                 self.correlation_result.setRowCount(len(scores))
-                for i, (code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_qc, matching_attrs_ff, negative_attrs, is_rushing, node_level) in enumerate(scores):
+                for i, (code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_region, matching_attrs_qc, matching_attrs_qc_letter, matching_attrs_qc_region, matching_attrs_ff, negative_attrs, is_rushing, node_level) in enumerate(scores):
                     self.correlation_result.setItem(i, 0, QTableWidgetItem(code))
                     self.correlation_result.setItem(i, 1, QTableWidgetItem(name))
                     score_item = NumericTableItem(f"{score:.2f}")
@@ -6389,7 +6050,7 @@ class StockMasterApp(QMainWindow):
                     self.correlation_result.setItem(i, 2, score_item)
                     attrs_yz_str = ', '.join(matching_attrs_yz + matching_attrs_letter + matching_attrs_region)
                     self.correlation_result.setItem(i, 3, QTableWidgetItem(attrs_yz_str))
-                    attrs_qc_str = ', '.join(matching_attrs_qc)
+                    attrs_qc_str = ', '.join(matching_attrs_qc + matching_attrs_qc_letter + matching_attrs_qc_region)
                     self.correlation_result.setItem(i, 4, QTableWidgetItem(attrs_qc_str))
                     attrs_ff_str = ', '.join(matching_attrs_ff)
                     self.correlation_result.setItem(i, 5, QTableWidgetItem(attrs_ff_str))
@@ -6416,7 +6077,7 @@ class StockMasterApp(QMainWindow):
                 self.correlation_result.resizeColumnToContents(7)
                 
                 # 为每一行设置颜色
-                for i, (code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_qc, matching_attrs_ff, negative_attrs, is_rushing, node_level) in enumerate(scores):
+                for i, (code, name, score, matching_attrs_yz, matching_attrs_letter, matching_attrs_region, matching_attrs_qc, matching_attrs_qc_letter, matching_attrs_qc_region, matching_attrs_ff, negative_attrs, is_rushing, node_level) in enumerate(scores):
                     # 获取股票评价并设置颜色
                     cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
                     stock = cursor.fetchone()
@@ -6870,10 +6531,13 @@ class StockMasterApp(QMainWindow):
                     initials.append(initial)
         return initials
 
-    def add_pinyin_initial_attributes(self, stock_id, name):
+    def add_pinyin_initial_attributes(self, stock_id, name, conn=None, cursor=None):
         """为股票添加拼音首字母属性"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        close_conn = False
+        if conn is None:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            close_conn = True
         
         try:
             # 获取拼音首字母（以科技结尾的股票跳过K、J属性）
@@ -6897,11 +6561,13 @@ class StockMasterApp(QMainWindow):
                 cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
                               (stock_id, QDate.currentDate().toString('yyyy-MM-dd'), '科技'))
             
-            conn.commit()
+            if close_conn:
+                conn.commit()
         except Exception as e:
             print(f"Error adding pinyin attributes: {e}")
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
     def check_and_update_keji_attributes(self):
         """检查并更新科技属性（只执行一次）"""
@@ -7008,6 +6674,86 @@ class StockMasterApp(QMainWindow):
             return 0
         finally:
             conn.close()
+
+    def delete_stocks(self):
+        """删除股票及关联数据"""
+        from PyQt5.QtWidgets import QInputDialog, QTextEdit, QVBoxLayout, QDialog, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('删除股票')
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('输入要删除的股票代码（多个用逗号、空格或换行分隔）：'))
+
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText('例如：600519, 000858, 920199')
+        text_edit.setMaximumHeight(120)
+        layout.addWidget(text_edit)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        raw = text_edit.toPlainText().strip()
+        if not raw:
+            return
+
+        codes = re.findall(r'(\d{6})', raw)
+        if not codes:
+            QMessageBox.warning(self, '提示', '未识别到有效的股票代码')
+            return
+
+        # 去重
+        codes = list(set(codes))
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        found_ids = []
+        not_found = []
+        for code in codes:
+            cursor.execute('SELECT id, name FROM stocks WHERE code = ?', (code,))
+            row = cursor.fetchone()
+            if row:
+                found_ids.append((row[0], code, row[1]))
+            else:
+                not_found.append(code)
+
+        if not found_ids:
+            QMessageBox.warning(self, '提示', '这些股票代码在本地库中不存在')
+            conn.close()
+            return
+
+        msg = f'确定要删除以下 {len(found_ids)} 只股票及其所有关联数据？\n\n（将同时删除属性、竞价记录、板数记录等）\n'
+        for _, code, name in found_ids:
+            msg += f'\n  {code} {name}'
+        if not_found:
+            msg += f'\n\n以下代码不存在：{", ".join(not_found)}'
+
+        reply = QMessageBox.question(self, '确认删除', msg,
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            conn.close()
+            return
+
+        for stock_id, code, name in found_ids:
+            cursor.execute('DELETE FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+            cursor.execute('DELETE FROM board_counts WHERE stock_id = ?', (stock_id,))
+            cursor.execute('DELETE FROM bidding_records WHERE stock_id = ?', (stock_id,))
+            cursor.execute('DELETE FROM bidding_rush_stocks WHERE stock_id = ?', (stock_id,))
+            cursor.execute('DELETE FROM stocks WHERE id = ?', (stock_id,))
+            print(f"已删除 {code} {name}")
+
+        conn.commit()
+        conn.close()
+
+        QMessageBox.information(self, '完成', f'已删除 {len(found_ids)} 只股票')
+        self.load_stocks()
 
     def add_stock(self):
         from PyQt5.QtWidgets import QMessageBox
@@ -7153,7 +6899,7 @@ class StockMasterApp(QMainWindow):
                 resp = requests.get(url, headers=headers, timeout=15)
                 resp.raise_for_status()
                 data = resp.json()
-                board_list = data.get('result', {}).get('data', [])
+                board_list = (data.get('result') or {}).get('data', [])
                 for item in board_list:
                     bn = item.get('BOARD_NAME', '')
                     if bn and bn not in all_board_names:
@@ -7331,24 +7077,26 @@ class StockMasterApp(QMainWindow):
                             if item:
                                 item.setBackground(Qt.red)
 
-            # 加载竞价抢筹属性
+            # 加载竞价抢筹股票
             cursor.execute('''
-                SELECT id, attribute, intensity, create_time
-                FROM bidding_rush_attrs
-                WHERE date = ?
-                ORDER BY intensity DESC, id ASC
+                SELECT brs.id, s.code, s.name, brs.pct_change, brs.create_time
+                FROM bidding_rush_stocks brs
+                JOIN stocks s ON brs.stock_id = s.id
+                WHERE brs.date = ?
+                ORDER BY brs.pct_change DESC, brs.id ASC
             ''', (date,))
-            rushing_attrs = cursor.fetchall()
+            rushing_stocks = cursor.fetchall()
 
-            self.rushing_attrs_table.setRowCount(len(rushing_attrs))
-            for i, (r_id, attr, intensity, create_time) in enumerate(rushing_attrs):
-                self.rushing_attrs_table.setItem(i, 0, QTableWidgetItem(attr))
-                intensity_item = QTableWidgetItem(f'{intensity:.1f}')
-                intensity_item.setTextAlignment(Qt.AlignCenter)
-                intensity_item.setData(Qt.UserRole, r_id)
-                intensity_item.setFlags(intensity_item.flags() | Qt.ItemIsEditable)
-                self.rushing_attrs_table.setItem(i, 1, intensity_item)
-                self.rushing_attrs_table.setItem(i, 2, QTableWidgetItem(str(create_time)))
+            self.rushing_attrs_table.setRowCount(len(rushing_stocks))
+            for i, (r_id, code, name, pct_change, create_time) in enumerate(rushing_stocks):
+                self.rushing_attrs_table.setItem(i, 0, QTableWidgetItem(code))
+                self.rushing_attrs_table.setItem(i, 1, QTableWidgetItem(name))
+                pct_item = QTableWidgetItem(f'{pct_change:.2f}')
+                pct_item.setTextAlignment(Qt.AlignCenter)
+                pct_item.setData(Qt.UserRole, r_id)
+                pct_item.setFlags(pct_item.flags() | Qt.ItemIsEditable)
+                self.rushing_attrs_table.setItem(i, 2, pct_item)
+                self.rushing_attrs_table.setItem(i, 3, QTableWidgetItem(str(create_time)))
 
                 button_layout = QHBoxLayout()
                 delete_btn = QPushButton('删除')
@@ -7358,7 +7106,7 @@ class StockMasterApp(QMainWindow):
                 button_layout.addWidget(delete_btn)
                 button_widget = QWidget()
                 button_widget.setLayout(button_layout)
-                self.rushing_attrs_table.setCellWidget(i, 3, button_widget)
+                self.rushing_attrs_table.setCellWidget(i, 4, button_widget)
 
             # 加载竞价负反馈
             cursor.execute('''
@@ -7442,21 +7190,21 @@ class StockMasterApp(QMainWindow):
         except Exception as e:
             print(f"Error deleting bidding record: {e}")
 
-    def delete_rush_attr(self, attr_id):
+    def delete_rush_attr(self, rush_id):
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
-            cursor.execute('DELETE FROM bidding_rush_attrs WHERE id = ?', (attr_id,))
+            cursor.execute('DELETE FROM bidding_rush_stocks WHERE id = ?', (rush_id,))
             conn.commit()
             conn.close()
 
             self.load_bidding_records()
         except Exception as e:
-            print(f"Error deleting rush attr: {e}")
+            print(f"Error deleting rush stock: {e}")
 
     def on_rush_attr_intensity_changed(self, row, col):
-        if col != 1:
+        if col != 2:  # 涨幅%列
             return
         if getattr(self, '_updating_intensity', False):
             return
@@ -7465,8 +7213,8 @@ class StockMasterApp(QMainWindow):
         if not item:
             return
 
-        attr_id = item.data(Qt.UserRole)
-        if not attr_id:
+        rush_id = item.data(Qt.UserRole)
+        if not rush_id:
             return
 
         try:
@@ -7474,14 +7222,14 @@ class StockMasterApp(QMainWindow):
         except ValueError:
             return
 
-        if new_value < 0.1 or new_value > 99.9:
+        if new_value < -50 or new_value > 99.9:
             return
 
         try:
             self._updating_intensity = True
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute('UPDATE bidding_rush_attrs SET intensity = ? WHERE id = ?', (new_value, attr_id))
+            cursor.execute('UPDATE bidding_rush_stocks SET pct_change = ? WHERE id = ?', (new_value, rush_id))
             conn.commit()
             conn.close()
 
@@ -7506,8 +7254,8 @@ class StockMasterApp(QMainWindow):
 
         layout = QVBoxLayout(dialog)
 
-        layout.addWidget(QLabel('每行一个属性，格式：属性名 爆量倍数（空格分隔），例如：'))
-        hint = QLabel('化工 10.1\n氟化工 9.5\n锂电池 7.1')
+        layout.addWidget(QLabel('每行一个股票，格式：股票名称/代码 涨幅%（空格分隔），例如：'))
+        hint = QLabel('贵州茅台 5.2\n宁德时代 3.8\n东方财富 2.5')
         hint.setStyleSheet('color: #666; font-family: monospace; font-size: 12px;')
         layout.addWidget(hint)
 
@@ -7541,15 +7289,9 @@ class StockMasterApp(QMainWindow):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         errors = []
-        attr_intensity_map = {}
+        success_count = 0
 
         try:
-            cursor.execute('SELECT DISTINCT attribute FROM stock_attributes')
-            all_attrs = {row[0] for row in cursor.fetchall()}
-
-            cursor.execute('SELECT attribute, intensity FROM bidding_rush_attrs WHERE date = ?', (date,))
-            existing_map = {row[0]: row[1] for row in cursor.fetchall()}
-
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -7560,44 +7302,40 @@ class StockMasterApp(QMainWindow):
                     errors.append(f'格式错误: "{line}"')
                     continue
 
-                attr_name = ' '.join(parts[:-1])
-                attr_name = ATTR_RENAME_MAP.get(attr_name, attr_name)
+                stock_input = ' '.join(parts[:-1])
                 try:
-                    intensity = float(parts[-1])
+                    pct_change = float(parts[-1])
                 except ValueError:
-                    errors.append(f'倍数无效: "{line}"')
+                    errors.append(f'涨幅无效: "{line}"')
                     continue
 
-                if intensity < 0.1 or intensity > 300.0:
-                    errors.append(f'倍数超出范围(0.1~300.0): "{line}"')
+                if pct_change < -50 or pct_change > 99.9:
+                    errors.append(f'涨幅超出范围(-50~99.9): "{line}"')
                     continue
 
-                if attr_name not in all_attrs:
-                    errors.append(f'属性不存在: "{attr_name}"')
+                # 搜索股票
+                cursor.execute('SELECT id, code, name FROM stocks WHERE code = ?', (stock_input,))
+                stock = cursor.fetchone()
+                if not stock:
+                    cursor.execute('SELECT id, code, name FROM stocks WHERE name LIKE ?', (f'%{stock_input}%',))
+                    stock = cursor.fetchone()
+
+                if not stock:
+                    errors.append(f'未找到股票: "{stock_input}"')
                     continue
 
-                if attr_name in attr_intensity_map:
-                    attr_intensity_map[attr_name] = max(attr_intensity_map[attr_name], intensity)
+                stock_id, code, name = stock
+
+                # 检查是否已存在
+                cursor.execute('SELECT id FROM bidding_rush_stocks WHERE date = ? AND stock_id = ?', (date, stock_id))
+                existing = cursor.fetchone()
+                if existing:
+                    cursor.execute('UPDATE bidding_rush_stocks SET pct_change = ? WHERE date = ? AND stock_id = ?',
+                                   (pct_change, date, stock_id))
                 else:
-                    attr_intensity_map[attr_name] = intensity
-
-            success_count = 0
-            skip_count = 0
-            update_count = 0
-
-            for attr_name, intensity in attr_intensity_map.items():
-                old_intensity = existing_map.get(attr_name)
-                if old_intensity is not None:
-                    if intensity > old_intensity:
-                        cursor.execute('UPDATE bidding_rush_attrs SET intensity = ? WHERE date = ? AND attribute = ?',
-                                       (intensity, date, attr_name))
-                        update_count += 1
-                    else:
-                        skip_count += 1
-                else:
-                    cursor.execute('INSERT INTO bidding_rush_attrs (date, attribute, intensity) VALUES (?, ?, ?)',
-                                   (date, attr_name, intensity))
-                    success_count += 1
+                    cursor.execute('INSERT INTO bidding_rush_stocks (date, stock_id, pct_change) VALUES (?, ?, ?)',
+                                   (date, stock_id, pct_change))
+                success_count += 1
 
             conn.commit()
         finally:
@@ -7614,13 +7352,9 @@ class StockMasterApp(QMainWindow):
         msg = '导入完成！'
         parts_msg = []
         if success_count:
-            parts_msg.append(f'新增: {success_count} 条')
-        if update_count:
-            parts_msg.append(f'更新(取较大值): {update_count} 条')
-        if skip_count:
-            parts_msg.append(f'跳过(已有更大值): {skip_count} 条')
+            parts_msg.append(f'导入: {success_count} 只股票')
         if trimmed:
-            parts_msg.append(f'超出{MAX_RUSH_ATTRS}条限制，已舍弃低强度{trimmed}条')
+            parts_msg.append(f'超出{MAX_RUSH_ATTRS}条限制，已舍弃低涨幅{trimmed}条')
         if parts_msg:
             msg += '\n' + '，'.join(parts_msg)
         if errors:
@@ -7636,15 +7370,15 @@ class StockMasterApp(QMainWindow):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         try:
-            cursor.execute('SELECT COUNT(*) FROM bidding_rush_attrs WHERE date = ?', (date,))
+            cursor.execute('SELECT COUNT(*) FROM bidding_rush_stocks WHERE date = ?', (date,))
             total = cursor.fetchone()[0]
             if total > MAX_RUSH_ATTRS:
                 cursor.execute('''
-                    DELETE FROM bidding_rush_attrs
+                    DELETE FROM bidding_rush_stocks
                     WHERE date = ? AND id NOT IN (
-                        SELECT id FROM bidding_rush_attrs
+                        SELECT id FROM bidding_rush_stocks
                         WHERE date = ?
-                        ORDER BY intensity DESC
+                        ORDER BY pct_change DESC
                         LIMIT ?
                     )
                 ''', (date, date, MAX_RUSH_ATTRS))
@@ -7794,7 +7528,11 @@ class StockMasterApp(QMainWindow):
         self.STOCK_WEIGHT_FIRST = self.first_stock_weight_input.value()
         self.STOCK_WEIGHT_LAST = self.last_stock_weight_input.value()
         self.BOARD_WEIGHT = self.board_weight_input.value()
-        self.RUSHING_ATTR_WEIGHT = self.rushing_attr_weight_input.value()
+        self.RUSH_ATTR_COEFFICIENT = self.rush_attr_coefficient_input.value()
+        self.RUSH_PCT_COEFFICIENT = self.rush_pct_coefficient_input.value()
+        self.RUSH_LETTER_ATTR_WEIGHT = self.rush_letter_attr_weight_input.value()
+        self.RUSH_REGION_ATTR_WEIGHT = self.rush_region_attr_weight_input.value()
+        self.RUSH_MARKET_CAP_COEFFICIENT = self.rush_market_cap_coefficient_input.value()
         self.YZ_OVERALL_WEIGHT = self.yz_overall_weight_input.value()
         self.ATTR_COUNT_WEIGHT = self.attr_count_weight_input.value()
         self.NEGATIVE_ATTR_COUNT_WEIGHT = self.negative_attr_count_weight_input.value()
@@ -7829,7 +7567,10 @@ class StockMasterApp(QMainWindow):
 
             param_keys = [
                 'stock_weight_first', 'stock_weight_last', 'board_weight',
-                'rushing_attr_weight', 'yz_overall_weight', 'letter_attr_weight',
+                'rush_attr_coefficient', 'rush_pct_coefficient',
+                'rush_letter_attr_weight', 'rush_region_attr_weight',
+                'rush_market_cap_coefficient',
+                'yz_overall_weight', 'letter_attr_weight',
                 'region_attr_weight', 'attr_count_weight',
                 'negative_attr_count_weight', 'negative_overall_weight',
                 'board_press_weight', 'node_guide_weight', 'holder_ratio_weight',
@@ -7839,7 +7580,11 @@ class StockMasterApp(QMainWindow):
                 'stock_weight_first': '首股票权重',
                 'stock_weight_last': '末股票权重',
                 'board_weight': '每板权重',
-                'rushing_attr_weight': '竞价抢筹权重',
+                'rush_attr_coefficient': '抢筹属性总系数 a',
+                'rush_pct_coefficient': '涨幅系数 b',
+                'rush_letter_attr_weight': '抢筹字母属性',
+                'rush_region_attr_weight': '抢筹地区属性',
+                'rush_market_cap_coefficient': '抢筹市值系数',
                 'yz_overall_weight': '一字板整体',
                 'letter_attr_weight': '字母属性',
                 'region_attr_weight': '地区属性',
@@ -7870,15 +7615,26 @@ class StockMasterApp(QMainWindow):
 
         # 检查是否已有保存的分析结果
         saved = self.load_correlation_results()
+        new_only = False
         if saved is not None:
-            reply = QMessageBox.question(self, '参数属性判定',
-                f'已有{len(saved["results"])}个参数的分析结果。\n\n'
-                f'  是 → 直接显示已保存的结果\n'
-                f'  否 → 重新执行分析并覆盖',
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply == QMessageBox.Yes:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('参数属性判定')
+            msg.setText(f'已有{len(saved["results"])}个参数的分析结果，请选择操作：')
+            btn_show = msg.addButton('显示已保存', QMessageBox.ActionRole)
+            btn_new = msg.addButton('仅分析新增参数', QMessageBox.ActionRole)
+            btn_all = msg.addButton('重新全部分析', QMessageBox.ActionRole)
+            msg.addButton('取消', QMessageBox.RejectRole)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == btn_show:
                 self._show_correlation_results(saved)
                 return
+            elif clicked == btn_new:
+                new_only = True
+            elif clicked == btn_all:
+                pass  # 继续全量分析
+            else:
+                return  # 取消
 
         start_date = self.backtest_start_date.date()
         end_date = self.backtest_end_date.date()
@@ -7921,9 +7677,37 @@ class StockMasterApp(QMainWindow):
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
 
+        # 如果仅分析新增，预加载已有判定结果的参数key
+        analyzed_keys = set()
+        if new_only:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT DISTINCT param_key FROM correlation_results')
+                analyzed_keys = {row[0] for row in cursor.fetchall()}
+                conn.close()
+                if analyzed_keys:
+                    self._corr_status_label.setText(f'已有 {len(analyzed_keys)} 个参数已判定，仅分析新增参数...')
+            except Exception:
+                pass
+
+        def on_correlation_finished(data):
+            # 仅分析新增模式：阻止 _on_correlation_finished 内部自动保存（由下面自行控制）
+            if new_only:
+                self._corr_suppress_save = True
+            self._on_correlation_finished(dialog, result_table, progress, data, close_btn)
+            self._corr_suppress_save = False
+            # 仅保存新增参数的判定结果
+            if new_only and analyzed_keys:
+                new_results = [r for r in data['results'] if r[0] not in analyzed_keys]
+                if new_results:
+                    self.save_correlation_results(new_results)
+                    suffix = f'，其中新增 {len(new_results)} 个'
+                    self._corr_status_label.setText(f'分析完成 ✓{suffix}')
+
         self._correlation_thread = CorrelationAnalysisThread(self, self.db_path, start_str, end_str)
         self._correlation_thread.progress_signal.connect(progress.setValue)
-        self._correlation_thread.finished_signal.connect(lambda data: self._on_correlation_finished(dialog, result_table, progress, data, close_btn))
+        self._correlation_thread.finished_signal.connect(on_correlation_finished)
         self._correlation_thread.error_signal.connect(lambda msg: QMessageBox.critical(self, '错误', f'分析失败: {msg}'))
         self._correlation_thread.finished_signal.connect(self._correlation_thread.deleteLater)
         self._correlation_thread.error_signal.connect(self._correlation_thread.deleteLater)
@@ -8015,7 +7799,7 @@ class StockMasterApp(QMainWindow):
             close_btn.setEnabled(True)
 
         # 保存结果到数据库（仅当是实时分析产生的数据，非加载已保存）
-        if progress is not None and len(results) > 0 and results[0][2] != 0.0:
+        if progress is not None and len(results) > 0 and results[0][2] != 0.0 and not getattr(self, '_corr_suppress_save', False):
             self.save_correlation_results(results)
 
     def _save_factor_governance(self):
@@ -8030,6 +7814,43 @@ class StockMasterApp(QMainWindow):
             conn.commit()
         finally:
             conn.close()
+
+    def _load_hexin_v(self):
+        """从数据库加载 hexin-v 令牌"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT value FROM app_settings WHERE key = ?', ('hexin_v',))
+            row = cursor.fetchone()
+            if row:
+                self.hexin_v = row[0]
+                print(f"[hexin-v] 已从数据库加载")
+            conn.close()
+        except Exception as e:
+            print(f"[hexin-v] 加载失败: {e}")
+
+    def _save_hexin_v_from_ui(self):
+        """从 UI 输入框保存 hexin-v 令牌"""
+        value = self.hexin_v_input.text().strip()
+        if not value:
+            QMessageBox.warning(self, '提示', 'hexin-v 不能为空')
+            return
+        self._save_hexin_v(value)
+        QMessageBox.information(self, '成功', 'hexin-v 已更新并保存')
+
+    def _save_hexin_v(self, value):
+        """保存 hexin-v 令牌到数据库"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+                           ('hexin_v', value))
+            conn.commit()
+            conn.close()
+            self.hexin_v = value
+            print(f"[hexin-v] 已保存")
+        except Exception as e:
+            print(f"[hexin-v] 保存失败: {e}")
 
     def _load_factor_governance(self):
         try:
@@ -8057,7 +7878,11 @@ class StockMasterApp(QMainWindow):
         ('stock_weight_first', '首股票权重', '权重系数', Coefficients.STOCK_WEIGHT_FIRST),
         ('stock_weight_last', '末股票权重', '权重系数', Coefficients.STOCK_WEIGHT_LAST),
         ('board_weight', '每板权重', '板数因子', Coefficients.BOARD_WEIGHT),
-        ('rushing_attr_weight', '竞价抢筹权重', '抢筹因子', Coefficients.RUSHING_ATTR_WEIGHT),
+        ('rush_attr_coefficient', '抢筹属性总系数 a', '抢筹系数', Coefficients.RUSH_ATTR_COEFFICIENT),
+        ('rush_pct_coefficient', '涨幅系数 b', '抢筹系数', Coefficients.RUSH_PCT_COEFFICIENT),
+        ('rush_letter_attr_weight', '抢筹字母属性系数', '抢筹系数', Coefficients.RUSH_LETTER_ATTR_WEIGHT),
+        ('rush_region_attr_weight', '抢筹地区属性系数', '抢筹系数', Coefficients.RUSH_REGION_ATTR_WEIGHT),
+        ('rush_market_cap_coefficient', '抢筹市值系数', '抢筹系数', Coefficients.RUSH_MARKET_CAP_COEFFICIENT),
         ('yz_overall_weight', '一字板整体', '一字板因子', Coefficients.YZ_OVERALL_WEIGHT),
         ('letter_attr_weight', '字母属性', '属性因子', Coefficients.LETTER_ATTR_WEIGHT),
         ('region_attr_weight', '地区属性', '属性因子', Coefficients.REGION_ATTR_WEIGHT),
@@ -8109,6 +7934,38 @@ class StockMasterApp(QMainWindow):
         progress = QProgressBar()
         progress.setMaximum(100)
         analysis_layout.addWidget(progress)
+
+        # 因子选择区域
+        factor_sel_group = QGroupBox('选择要分析的因子（取消勾选则跳过分析，保留上次结果）')
+        factor_sel_layout = QVBoxLayout(factor_sel_group)
+        factor_sel_btn_layout = QHBoxLayout()
+        select_all_btn = QPushButton('全选')
+        deselect_all_btn = QPushButton('取消全选')
+        factor_sel_btn_layout.addWidget(select_all_btn)
+        factor_sel_btn_layout.addWidget(deselect_all_btn)
+        factor_sel_btn_layout.addStretch()
+        factor_sel_layout.addLayout(factor_sel_btn_layout)
+
+        factor_scroll = QScrollArea()
+        factor_scroll.setWidgetResizable(True)
+        factor_scroll.setMaximumHeight(120)
+        factor_scroll_content = QWidget()
+        factor_scroll_grid = QGridLayout(factor_scroll_content)
+        self._gov_factor_checkboxes = {}
+        for idx, (key, name, group, val) in enumerate(self.FACTOR_DEFS):
+            cb = QCheckBox(f'{name}')
+            cb.setChecked(True)
+            cb.setToolTip(f'参数: {key}')
+            self._gov_factor_checkboxes[key] = cb
+            factor_scroll_grid.addWidget(cb, idx // 4, idx % 4)
+        factor_scroll.setWidget(factor_scroll_content)
+        factor_sel_layout.addWidget(factor_scroll)
+
+        select_all_btn.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in self._gov_factor_checkboxes.values()])
+        deselect_all_btn.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in self._gov_factor_checkboxes.values()])
+        analysis_layout.addWidget(factor_sel_group)
 
         self._gov_table = QTableWidget()
         self._gov_table.setColumnCount(9)
@@ -8256,11 +8113,22 @@ class StockMasterApp(QMainWindow):
                     self.progress_signal.emit(5)
 
                     for idx, (key, name, group, cur_val) in enumerate(FACTOR_DEFS):
-                        orig_val = getattr(self.main, BAYESIAN_TO_COEFFICIENT.get(key, key.upper()))
-                        isolate_val = orig_val
-                        setattr(self.main, BAYESIAN_TO_COEFFICIENT.get(key, key.upper()), isolate_val)
+                        # 跳过未选中的因子
+                        factor_cbs = getattr(self.main, '_gov_factor_checkboxes', {})
+                        if key in factor_cbs and not factor_cbs[key].isChecked():
+                            single_scores[key] = {
+                                'effectiveness': 0,
+                                'marginal': 0,
+                                'score_with': baseline_score,
+                                'score_without': baseline_score,
+                                'skipped': True,
+                            }
+                            pct = 5 + int((idx + 1) / n_factors * 40)
+                            self.progress_signal.emit(pct)
+                            continue
 
-                        others_zero = getattr(self.main, BAYESIAN_TO_COEFFICIENT.get(key, key.upper()))
+                        orig_val = getattr(self.main, BAYESIAN_TO_COEFFICIENT.get(key, key.upper()))
+
                         score_with = self.main._optimization_backtest(self.start_str, self.end_str)
 
                         # 禁用当前因子：乘法因子置1，其他置0
@@ -8287,6 +8155,12 @@ class StockMasterApp(QMainWindow):
                     noise_levels = {}
                     n_noise = max(3, n_factors // 3)
                     for idx, (key, name, group, cur_val) in enumerate(FACTOR_DEFS):
+                        # 跳过未选中的因子
+                        if key in factor_cbs and not factor_cbs[key].isChecked():
+                            noise_levels[key] = 0.0
+                            pct = 50 + int((idx + 1) / n_factors * 30)
+                            self.progress_signal.emit(pct)
+                            continue
                         vals = []
                         for _ in range(n_noise):
                             orig = getattr(self.main, BAYESIAN_TO_COEFFICIENT.get(key, key.upper()))
@@ -8327,6 +8201,11 @@ class StockMasterApp(QMainWindow):
                     results = []
                     whitelist_selected = {k for k, cb in self.main._gov_whitelist_cbs.items() if cb.isChecked()}
                     for key, name, group, cur_val in FACTOR_DEFS:
+                        # 跳过的因子
+                        if single_scores[key].get('skipped'):
+                            results.append((name, group, cur_val, 0.0, 0.0, 0.0,
+                                            '已跳过', '保留(未分析)', key in whitelist_selected))
+                            continue
                         eff = single_scores[key]['effectiveness']
                         noise = noise_levels[key]
                         red = redundancy[key]
@@ -8437,7 +8316,9 @@ class StockMasterApp(QMainWindow):
             self._gov_table.setItem(i, 7, QTableWidgetItem(suggestion))
             self._gov_table.setItem(i, 8, QTableWidgetItem('✓' if whitelist else ''))
 
-            if '剔除' in suggestion:
+            if status == '已跳过':
+                color = QColor(230, 230, 230)
+            elif '剔除' in suggestion:
                 color = QColor(255, 200, 200)
                 cnt_eliminate += 1
             elif '降权' in suggestion or '降噪' in suggestion:
@@ -8452,8 +8333,9 @@ class StockMasterApp(QMainWindow):
             for col in range(9):
                 self._gov_table.item(i, col).setBackground(color)
 
-            report_lines.append(f'  [{status:12s}] {name:10s} | 值={cur_val:.4f} | '
-                                f'有效={eff:.1f} | 噪声={noise:.2f} | 冗余={red:.2f} | 建议:{suggestion}')
+            if status != '已跳过':
+                report_lines.append(f'  [{status:12s}] {name:10s} | 值={cur_val:.4f} | '
+                                    f'有效={eff:.1f} | 噪声={noise:.2f} | 冗余={red:.2f} | 建议:{suggestion}')
 
         report_lines.append('')
         report_lines.append(f'{"="*70}')
@@ -8672,8 +8554,8 @@ class StockMasterApp(QMainWindow):
                     INSERT INTO backtest_results 
                     (test_date, start_date, end_date, total_score, valid_days, total_valid_stocks, 
                      top_n, valid_score, stock_weight_first, stock_weight_last, board_weight,
-                     rushing_weight, yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_overall_weight, node_guide_weight, holder_ratio_weight, detail_text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rushing_weight, rush_pct_coefficient, rush_letter_attr_weight, rush_region_attr_weight, rush_market_cap_coefficient, yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_overall_weight, node_guide_weight, holder_ratio_weight, detail_text)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     QDate.currentDate().toString('yyyy-MM-dd'),
                     start_date.toString('yyyy-MM-dd'),
@@ -8686,7 +8568,11 @@ class StockMasterApp(QMainWindow):
                     self.STOCK_WEIGHT_FIRST,
                     self.STOCK_WEIGHT_LAST,
                     self.BOARD_WEIGHT,
-                    self.RUSHING_ATTR_WEIGHT,
+                    self.RUSH_ATTR_COEFFICIENT,
+                    self.RUSH_PCT_COEFFICIENT,
+                    self.RUSH_LETTER_ATTR_WEIGHT,
+                    self.RUSH_REGION_ATTR_WEIGHT,
+                    self.RUSH_MARKET_CAP_COEFFICIENT,
                     self.YZ_OVERALL_WEIGHT,
                     self.ATTR_COUNT_WEIGHT,
                     self.NEGATIVE_ATTR_COUNT_WEIGHT,
@@ -8882,7 +8768,11 @@ class StockMasterApp(QMainWindow):
             for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                                 ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                                 ('board_weight', 'BOARD_WEIGHT'),
-                                ('rushing_attr_weight', 'RUSHING_ATTR_WEIGHT'),
+                                ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+                            ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
+                                ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
+                                ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
+                                ('rush_market_cap_coefficient', 'RUSH_MARKET_CAP_COEFFICIENT'),
                                 ('yz_overall_weight', 'YZ_OVERALL_WEIGHT'),
                                 ('letter_attr_weight', 'LETTER_ATTR_WEIGHT'),
                                 ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
@@ -8920,7 +8810,9 @@ class StockMasterApp(QMainWindow):
             attr_weighted_count_yz = {}
             attr_weighted_count_letter = {}
             attr_weighted_count_region = {}
-            attr_weighted_count_qc = {}
+            attr_weighted_count_qc = {}  # 抢筹其他属性得分
+            attr_weighted_count_qc_letter = {}  # 抢筹字母属性得分
+            attr_weighted_count_qc_region = {}  # 抢筹地区属性得分
             attr_weighted_count_ff = {}
             
             # 统计每个属性的加减次数
@@ -8995,21 +8887,43 @@ class StockMasterApp(QMainWindow):
                     attr_weighted_count[attr] += ff_score
                     attr_weighted_count_ff[attr] += ff_score
 
-            # 读取竞价抢筹属性（从新表），直接使用爆量倍数 × 系数作为得分
+            # 读取竞价抢筹股票，按其属性加权计算抢筹得分
             cursor.execute('''
-                SELECT attribute, intensity
-                FROM bidding_rush_attrs
-                WHERE date = ?
+                SELECT brs.pct_change, s.id, s.total_market_cap
+                FROM bidding_rush_stocks brs
+                JOIN stocks s ON brs.stock_id = s.id
+                WHERE brs.date = ?
+                ORDER BY brs.pct_change DESC
             ''', (today_str,))
-            rush_attr_records = cursor.fetchall()
-            for attr, intensity in rush_attr_records:
-                if attr not in attr_weighted_count_qc:
-                    attr_weighted_count_qc[attr] = 0
-                if attr not in attr_weighted_count:
-                    attr_weighted_count[attr] = 0
-                rush_score = intensity / NORM_RUSHING_INTENSITY * self.RUSHING_ATTR_WEIGHT
-                attr_weighted_count_qc[attr] += rush_score
-                attr_weighted_count[attr] += rush_score
+            rush_stock_data = cursor.fetchall()
+            for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
+                # 获取该抢筹股票的属性
+                cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+                for row in cursor.fetchall():
+                    attr = row[0]
+                    if attr in ATTR_REMOVE_SET:
+                        continue
+                    # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
+                    market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
+                    rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
+                    if attr not in attr_weighted_count:
+                        attr_weighted_count[attr] = 0
+                    attr_weighted_count[attr] += rush_score_base
+                    if len(attr) == 1 and attr.isalpha():
+                        # 字母属性
+                        if attr not in attr_weighted_count_qc_letter:
+                            attr_weighted_count_qc_letter[attr] = 0
+                        attr_weighted_count_qc_letter[attr] += rush_score_base
+                    elif attr in REGION_NAMES:
+                        # 地区属性
+                        if attr not in attr_weighted_count_qc_region:
+                            attr_weighted_count_qc_region[attr] = 0
+                        attr_weighted_count_qc_region[attr] += rush_score_base
+                    else:
+                        # 其他属性
+                        if attr not in attr_weighted_count_qc:
+                            attr_weighted_count_qc[attr] = 0
+                        attr_weighted_count_qc[attr] += rush_score_base
 
             # 计算属性的总出现次数（绝对值）
             attr_total_counts = {}
@@ -9046,9 +8960,13 @@ class StockMasterApp(QMainWindow):
                 if attr in attr_weighted_count_region:
                     attr_weighted_count_region[attr] *= self.REGION_ATTR_WEIGHT
                 
-                # 应用到抢筹属性得分字典 - 抢筹得分已经直接由爆量倍数×系数计算，不再做二次缩放
+                # 应用到抢筹属性得分字典 - 按分类应用各自的属性系数
+                if attr in attr_weighted_count_qc_letter:
+                    attr_weighted_count_qc_letter[attr] *= self.RUSH_LETTER_ATTR_WEIGHT
+                if attr in attr_weighted_count_qc_region:
+                    attr_weighted_count_qc_region[attr] *= self.RUSH_REGION_ATTR_WEIGHT
                 if attr in attr_weighted_count_qc:
-                    pass
+                    attr_weighted_count_qc[attr] *= self.RUSH_ATTR_COEFFICIENT
                 
                 # 应用到负反馈属性得分字典 - 只应用negative_count_factor，保持负号
                 if attr in attr_weighted_count_ff:
@@ -9236,13 +9154,1575 @@ class StockMasterApp(QMainWindow):
             cursor = conn.cursor()
 
             cursor.execute('DELETE FROM bidding_records WHERE date = ?', (date,))
-            cursor.execute('DELETE FROM bidding_rush_attrs WHERE date = ?', (date,))
+            cursor.execute('DELETE FROM bidding_rush_stocks WHERE date = ?', (date,))
             conn.commit()
             conn.close()
 
             self.load_bidding_records()
         except Exception as e:
             print(f"Error clearing bidding records: {e}")
+
+    def clear_rush_stocks(self):
+        """清空当前日期竞价抢筹列表"""
+        try:
+            date = self.bidding_date.date().toString('yyyy-MM-dd')
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM bidding_rush_stocks WHERE date = ?', (date,))
+            conn.commit()
+            conn.close()
+            self.load_bidding_records()
+        except Exception as e:
+            print(f"Error clearing rush stocks: {e}")
+
+    def _ensure_rush_stock(self, cursor, date, stock_id, pct_change):
+        """确保股票已写入竞价抢筹表（insert 或 update）"""
+        cursor.execute('SELECT id FROM bidding_rush_stocks WHERE date = ? AND stock_id = ?',
+                       (date, stock_id))
+        if cursor.fetchone():
+            cursor.execute('UPDATE bidding_rush_stocks SET pct_change = ? WHERE date = ? AND stock_id = ?',
+                           (pct_change, date, stock_id))
+        else:
+            cursor.execute('INSERT INTO bidding_rush_stocks (date, stock_id, pct_change) VALUES (?, ?, ?)',
+                           (date, stock_id, pct_change))
+
+    def _deduplicate_bidding_data(self, conn, dates):
+        """后处理：对指定日期列表，去除抢筹表中与一字板重复的股票（一字板股票不应同时出现在抢筹里）"""
+        cursor = conn.cursor()
+        total_removed = 0
+        for qdate in dates:
+            date_str = qdate.toString('yyyy-MM-dd')
+            # 找出一字板(type=1)和抢筹(type=2)在同一日期共存的股票
+            cursor.execute('''
+                SELECT br2.stock_id
+                FROM bidding_records br1
+                JOIN bidding_records br2 ON br1.date = br2.date AND br1.stock_id = br2.stock_id
+                WHERE br1.date = ? AND br1.type = 1 AND br2.type = 2
+            ''', (date_str,))
+            dup_stock_ids = [row[0] for row in cursor.fetchall()]
+            if not dup_stock_ids:
+                continue
+            # 删除 bidding_rush_stocks 中对应记录
+            placeholders = ','.join(['?'] * len(dup_stock_ids))
+            cursor.execute(f'''
+                DELETE FROM bidding_rush_stocks
+                WHERE date = ? AND stock_id IN ({placeholders})
+            ''', (date_str, *dup_stock_ids))
+            removed_rush = cursor.rowcount
+            # 删除 bidding_records 中对应的抢筹(type=2)记录
+            cursor.execute(f'''
+                DELETE FROM bidding_records
+                WHERE date = ? AND type = 2 AND stock_id IN ({placeholders})
+            ''', (date_str, *dup_stock_ids))
+            removed_rec = cursor.rowcount
+            total_removed += removed_rush
+            if removed_rush > 0:
+                print(f'[去重] {date_str}: 移除 {removed_rush} 条抢筹记录（与一字板重复）')
+        conn.commit()
+        return total_removed
+
+    def _batch_create_rush_missing_stocks(self, stock_list, date):
+        """批量创建不在本地库的股票并获取板块属性"""
+        import requests
+        from PyQt5.QtWidgets import QProgressDialog
+
+        progress = QProgressDialog('正在创建股票并获取属性...', '取消', 0, len(stock_list), self)
+        progress.setWindowTitle('批量创建股票')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        for i, item in enumerate(stock_list):
+            if progress.wasCanceled():
+                break
+
+            code, name = item[0], item[1]
+            pct_change = item[2] if len(item) >= 3 else 5.0
+
+            progress.setValue(i)
+            progress.setLabelText(f'正在处理 {name}({code})  ({i+1}/{len(stock_list)})')
+
+            try:
+                # 检查是否已被其他操作插入
+                cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                existing = cursor.fetchone()
+                if existing:
+                    # 已有但未加入抢筹表，加入
+                    self._ensure_rush_stock(cursor, date, existing[0], pct_change)
+                    continue
+
+                cursor.execute('INSERT INTO stocks (code, name) VALUES (?, ?)', (code, name))
+                conn.commit()
+                cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                stock_id = cursor.fetchone()[0]
+
+                # 加入竞价抢筹列表
+                self._ensure_rush_stock(cursor, date, stock_id, pct_change)
+
+                # 添加拼音首字母属性
+                self.add_pinyin_initial_attributes(stock_id, name, conn, cursor)
+
+                # 从东方财富获取板块属性
+                if code.startswith('920'):
+                    market = 'BJ'
+                elif code.startswith('60') or code.startswith('688'):
+                    market = 'SH'
+                else:
+                    market = 'SZ'
+                secucode = f'{code}.{market}'
+
+                headers = {
+                    'Accept': '*/*',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+
+                board_names = []
+                try:
+                    url = (
+                        "https://datacenter.eastmoney.com/securities/api/data/v1/get?"
+                        "reportName=RPT_F10_CORETHEME_BOARDTYPE&"
+                        "columns=SECUCODE,SECURITY_CODE,SECURITY_NAME_ABBR,NEW_BOARD_CODE,BOARD_NAME,SELECTED_BOARD_REASON,IS_PRECISE,BOARD_RANK,BOARD_YIELD,DERIVE_BOARD_CODE&"
+                        f"filter=(SECUCODE%3D%22{secucode}%22)(IS_PRECISE%3D%221%22)&"
+                        "pageNumber=1&pageSize=200&sortTypes=1&sortColumns=BOARD_RANK&"
+                        "source=HSF10&client=PC&v=05407725378079107"
+                    )
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    data = resp.json()
+                    for item in (data.get('result') or {}).get('data', []):
+                        bn = item.get('BOARD_NAME', '')
+                        if bn and bn not in board_names:
+                            board_names.append(bn)
+                except Exception as e:
+                    print(f'获取 {code} 板块属性失败: {e}')
+
+                # 用第二个接口补充
+                try:
+                    url2 = (
+                        "https://datacenter.eastmoney.com/securities/api/data/get?"
+                        "type=RPT_F10_CORETHEME_BOARDTYPE&sty=ALL&"
+                        f"filter=(SECUCODE%3D%22{secucode}%22)&"
+                        "p=1&ps=200&sr=1&st=BOARD_RANK&"
+                        "source=HSF10&client=PC&v=04828710067581792"
+                    )
+                    resp2 = requests.get(url2, headers=headers, timeout=10)
+                    data2 = resp2.json()
+                    for item in data2.get('result', {}).get('data', []):
+                        bn = item.get('BOARD_NAME', '')
+                        if bn and bn not in board_names:
+                            board_names.append(bn)
+                except Exception as e:
+                    print(f'获取 {code} 板块属性失败(接口2): {e}')
+
+                # 保存属性到数据库
+                for board_name in board_names:
+                    cursor.execute(
+                        'INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
+                        (stock_id, date, board_name)
+                    )
+                conn.commit()
+            except Exception as e:
+                print(f"创建股票 {code} {name} 失败: {e}")
+
+        conn.close()
+        progress.setValue(len(stock_list))
+
+    def _call_rush_api(self, qdate):
+        """调用问财API获取指定日期的竞价数据，返回 (datas, gain_key, components)"""
+        date_str = qdate.toString('yyyy-MM-dd')
+        qc_date = qdate.toString('yyyy.M.d')
+        gain_key = f'竞价涨幅[{qdate.toString("yyyyMMdd")}]'
+        question = f'{qc_date}竞价涨幅大于5%;按照竞价涨幅排序'
+
+        url = 'https://www.iwencai.com/unifiedwap/unified-wap/v2/result/get-robot-data'
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://www.iwencai.com',
+            'hexin-v': self.hexin_v,
+            'Cookie': 'chat_bot_session_id=1cb8476c0ca664fc1761430187cd06b1; other_uid=Ths_iwencai_Xuangu_946086f7d300ab583cb90ff02ea2d227',
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0'
+            ),
+        }
+        post_data = {
+            'source': 'Ths_iwencai_Xuangu',
+            'version': '2.0',
+            'query_area': '',
+            'block_list': '',
+            'add_info': '{"urp":{"scene":1,"company":1,"business":1},"contentType":"json","searchInfo":true}',
+            'question': question,
+            'perpage': '50',
+            'page': '1',
+            'secondary_intent': 'stock',
+            'log_info': '{"input_type":"typewrite"}',
+            'rsh': 'Ths_iwencai_Xuangu_pdqany9yolmgyksxprq8mpymlluypssu',
+        }
+
+        response = requests.post(url, headers=headers, data=post_data, timeout=15)
+        result = response.json()
+
+        answer = result.get('data', {}).get('answer', [])
+        if not answer:
+            raise Exception('问财接口未返回数据')
+
+        txt_list = answer[0].get('txt', [])
+        if not txt_list:
+            raise Exception('接口返回格式异常（txt为空）')
+
+        components = txt_list[0].get('content', {}).get('components', [])
+        if not components:
+            raise Exception('接口返回格式异常（components为空）')
+
+        datas = components[0].get('data', {}).get('datas', [])
+        return datas, gain_key, components
+
+    def fetch_morning_rush_stocks(self):
+        """通过问财接口获取指定日期竞价涨幅大于5%的股票，按竞价涨幅排序"""
+        qdate = self.bidding_date.date()
+        date = qdate.toString('yyyy-MM-dd')
+
+        if qdate.dayOfWeek() in [6, 7]:
+            QMessageBox.warning(self, '提示', f'{date} 是周末，当天不开盘')
+            return
+        if self.is_chinese_holiday(qdate):
+            QMessageBox.warning(self, '提示', f'{date} 是法定节假日，当天不开盘')
+            return
+
+        try:
+            datas, gain_key, components = self._call_rush_api(qdate)
+            if not datas:
+                QMessageBox.warning(self, '提示', '未获取到股票数据')
+                return
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            added = 0
+            missing_stocks = []
+
+            for item in datas:
+                if added >= MAX_RUSH_ATTRS:
+                    break
+                code = str(item.get('code', '')).zfill(6)
+                pct_change = float(item.get(gain_key, 0))
+
+                if pct_change < 5.0:
+                    continue
+                if pct_change > 35.0:
+                    continue
+                if not code:
+                    continue
+
+                # 解析股票名称，用于 ST 过滤
+                stock_name = item.get('股票名称', '') or item.get('name', '')
+                if not stock_name and components:
+                    for col in components[0].get('data', {}).get('columns', []):
+                        if col.get('label') in ('name', '股票名称'):
+                            stock_name = item.get(col.get('key', ''), '')
+                            break
+                if '*ST' in stock_name or 'ST' in stock_name:
+                    continue
+
+                cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                stock = cursor.fetchone()
+                if stock:
+                    stock_id = stock[0]
+                    cursor.execute(
+                        'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1',
+                        (date, stock_id))
+                    if cursor.fetchone():
+                        continue
+                    self._ensure_rush_stock(cursor, date, stock_id, pct_change)
+                    added += 1
+                else:
+                    if stock_name:
+                        missing_stocks.append((code, stock_name, pct_change))
+                        added += 1  # 也计入限制
+
+            conn.commit()
+            conn.close()
+
+            msg = f'从问财获取到 {added} 只竞价涨幅>5%的股票，已填入竞价抢筹列表'
+            if missing_stocks:
+                msg += f'\n\n发现 {len(missing_stocks)} 只股票不在本地库中：'
+                for mc, mn, _ in missing_stocks[:10]:
+                    msg += f'\n  {mc} {mn}'
+                if len(missing_stocks) > 10:
+                    msg += f'\n  ...等共{len(missing_stocks)}只'
+                msg += '\n\n是否一键创建并获取它们的板块属性？'
+
+                reply = QMessageBox.question(self, '发现新股票', msg,
+                                             QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self._batch_create_rush_missing_stocks(missing_stocks, date)
+                    self.load_bidding_records()
+                    QMessageBox.information(self, '完成', f'已创建 {len(missing_stocks)} 只新股票并获取其板块属性')
+            else:
+                QMessageBox.information(self, '成功', msg)
+
+            self.load_bidding_records()
+
+        except requests.exceptions.Timeout:
+            QMessageBox.warning(self, '错误', '请求超时，请检查网络')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            err_msg = str(e)
+            try:
+                err_msg += f'\n响应状态: {getattr(response, "status_code", "?")}'
+                print(f'Response text: {getattr(response, "text", "?")[:500]}')
+            except Exception:
+                pass
+
+            is_auth_error = (
+                'JSONDecodeError' in err_msg or
+                'Expecting value' in err_msg or
+                '403' in err_msg
+            )
+            if is_auth_error:
+                reply = QMessageBox.warning(self, '令牌过期',
+                    '问财接口返回异常，可能是 hexin-v 令牌已过期。\n'
+                    '是否打开输入框更新 hexin-v？\n\n'
+                    '（从浏览器 F12 → Network 抓取 get-robot-data 请求的 hexin-v 请求头）',
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.hexin_v_input.setFocus()
+                    self.hexin_v_input.selectAll()
+            else:
+                QMessageBox.warning(self, '错误', f'获取数据失败: {err_msg[:200]}')
+
+    def _call_yiziban_api(self, qdate):
+        """调用问财API获取指定日期的竞价一字板（竞价涨停）数据"""
+        qc_date = qdate.toString('yyyy.M.d')
+        question = f'{qc_date}竞价涨停，按封单量从大到小排序'
+
+        url = 'https://www.iwencai.com/unifiedwap/unified-wap/v2/result/get-robot-data'
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://www.iwencai.com',
+            'hexin-v': self.hexin_v,
+            'Cookie': 'chat_bot_session_id=1cb8476c0ca664fc1761430187cd06b1; other_uid=Ths_iwencai_Xuangu_946086f7d300ab583cb90ff02ea2d227',
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0'
+            ),
+        }
+        post_data = {
+            'source': 'Ths_iwencai_Xuangu',
+            'version': '2.0',
+            'query_area': '',
+            'block_list': '',
+            'add_info': '{"urp":{"scene":1,"company":1,"business":1},"contentType":"json","searchInfo":true}',
+            'question': question,
+            'perpage': '50',
+            'page': '1',
+            'secondary_intent': 'stock',
+            'log_info': '{"input_type":"typewrite"}',
+            'rsh': 'Ths_iwencai_Xuangu_pdqany9yolmgyksxprq8mpymlluypssu',
+        }
+
+        response = requests.post(url, headers=headers, data=post_data, timeout=15)
+        result = response.json()
+
+        answer = result.get('data', {}).get('answer', [])
+        if not answer:
+            raise Exception('问财接口未返回数据')
+
+        txt_list = answer[0].get('txt', [])
+        if not txt_list:
+            raise Exception('接口返回格式异常（txt为空）')
+
+        components = txt_list[0].get('content', {}).get('components', [])
+        if not components:
+            raise Exception('接口返回格式异常（components为空）')
+
+        datas = components[0].get('data', {}).get('datas', [])
+        return datas, components
+
+    def fetch_yiziban_stocks(self):
+        """通过问财接口获取指定日期竞价涨停（一字板）股票"""
+        qdate = self.bidding_date.date()
+        date = qdate.toString('yyyy-MM-dd')
+
+        if qdate.dayOfWeek() in [6, 7]:
+            QMessageBox.warning(self, '提示', f'{date} 是周末，当天不开盘')
+            return
+        if self.is_chinese_holiday(qdate):
+            QMessageBox.warning(self, '提示', f'{date} 是法定节假日，当天不开盘')
+            return
+
+        try:
+            datas, components = self._call_yiziban_api(qdate)
+            if not datas:
+                QMessageBox.warning(self, '提示', '未获取到股票数据')
+                return
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            added = 0
+            missing_stocks = []
+
+            for item in datas:
+                code = str(item.get('code', '')).zfill(6)
+                if not code:
+                    continue
+
+                # 解析股票名称用于 ST 过滤
+                stock_name = item.get('股票名称', '') or item.get('name', '')
+                if not stock_name and components:
+                    for col in components[0].get('data', {}).get('columns', []):
+                        if col.get('label') in ('name', '股票名称'):
+                            stock_name = item.get(col.get('key', ''), '')
+                            break
+                if '*ST' in stock_name or 'ST' in stock_name:
+                    continue
+
+                cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                stock = cursor.fetchone()
+                if stock:
+                    stock_id = stock[0]
+                    cursor.execute(
+                        'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1',
+                        (date, stock_id))
+                    if cursor.fetchone():
+                        continue
+                    cursor.execute(
+                        'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 1, 1)',
+                        (date, stock_id))
+                    added += 1
+                else:
+                    name = stock_name
+                    if not name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                name = item.get(col.get('key', ''), '')
+                                break
+                    if name:
+                        missing_stocks.append((code, name))
+
+            conn.commit()
+            conn.close()
+
+            msg = f'从问财获取到 {added} 只竞价涨停股票，已填入竞价一字板列表'
+            if missing_stocks:
+                msg += f'\n\n发现 {len(missing_stocks)} 只股票不在本地库中：'
+                for mc, mn in missing_stocks[:10]:
+                    msg += f'\n  {mc} {mn}'
+                if len(missing_stocks) > 10:
+                    msg += f'\n  ...等共{len(missing_stocks)}只'
+                msg += '\n\n是否一键创建并获取它们的板块属性？'
+                reply = QMessageBox.question(self, '发现新股票', msg,
+                                             QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    missing_with_pct = [(c, n, 10.0) for c, n in missing_stocks]
+                    self._batch_create_rush_missing_stocks(missing_with_pct, date)
+                    self.load_bidding_records()
+                    QMessageBox.information(self, '完成', f'已创建 {len(missing_stocks)} 只新股票并获取其板块属性')
+            else:
+                QMessageBox.information(self, '成功', msg)
+
+            self.load_bidding_records()
+
+        except requests.exceptions.Timeout:
+            QMessageBox.warning(self, '错误', '请求超时，请检查网络')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            err_msg = str(e)
+            try:
+                err_msg += f'\n响应状态: {getattr(response, "status_code", "?")}'
+            except Exception:
+                pass
+            is_auth_error = (
+                'JSONDecodeError' in err_msg or
+                'Expecting value' in err_msg or
+                '403' in err_msg
+            )
+            if is_auth_error:
+                reply = QMessageBox.warning(self, '令牌过期',
+                    '问财接口返回异常，可能是 hexin-v 令牌已过期。\n'
+                    '是否打开输入框更新 hexin-v？',
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.hexin_v_input.setFocus()
+                    self.hexin_v_input.selectAll()
+            else:
+                QMessageBox.warning(self, '错误', f'获取数据失败: {err_msg[:200]}')
+
+    def batch_fetch_morning_rush_stocks(self):
+        """批量获取多日早盘竞价数据"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDateEdit, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('批量获取早盘竞价')
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel('起始日期:'))
+        start_date = QDateEdit()
+        start_date.setCalendarPopup(True)
+        start_date.setDate(QDate.currentDate().addDays(-5))
+        range_layout.addWidget(start_date)
+        range_layout.addWidget(QLabel('结束日期:'))
+        end_date = QDateEdit()
+        end_date.setCalendarPopup(True)
+        end_date.setDate(QDate.currentDate())
+        range_layout.addWidget(end_date)
+        layout.addLayout(range_layout)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        sd = start_date.date()
+        ed = end_date.date()
+        if sd > ed:
+            QMessageBox.warning(self, '提示', '起始日期不能晚于结束日期')
+            return
+
+        # 计算交易日数量
+        trading_dates = []
+        d = sd
+        while d <= ed:
+            if d.dayOfWeek() not in [6, 7] and not self.is_chinese_holiday(d):
+                trading_dates.append(d)
+            d = d.addDays(1)
+
+        if not trading_dates:
+            QMessageBox.warning(self, '提示', '所选区间内无交易日')
+            return
+
+        total = len(trading_dates)
+        reply = QMessageBox.question(self, '确认',
+            f'所选区间共 {total} 个交易日，将逐个获取早盘竞价数据。\n'
+            f'请确保 hexin-v 令牌有效。\n\n是否继续？',
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在批量获取...', '取消', 0, total, self)
+        progress.setWindowTitle('批量获取早盘竞价')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        total_added = 0
+        total_skipped = 0
+        all_missing_stocks = {}  # (code, name) -> pct_change for latest date
+        errors = []
+
+        for i, qdate in enumerate(trading_dates):
+            if progress.wasCanceled():
+                break
+
+            date_str = qdate.toString('yyyy-MM-dd')
+            progress.setValue(i)
+            progress.setLabelText(f'[{i+1}/{total}] {date_str}')
+
+            try:
+                datas, gain_key, components = self._call_rush_api(qdate)
+                if not datas:
+                    continue
+
+                added = 0
+                for item in datas:
+                    if added >= MAX_RUSH_ATTRS:
+                        break
+                    code = str(item.get('code', '')).zfill(6)
+                    pct_change = float(item.get(gain_key, 0))
+
+                    if pct_change < 5.0 or pct_change > 35.0 or not code:
+                        continue
+
+                    # 过滤 ST 股票
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        stock_id = stock[0]
+                        cursor.execute(
+                            'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1',
+                            (date_str, stock_id))
+                        if cursor.fetchone():
+                            total_skipped += 1
+                            continue
+                        self._ensure_rush_stock(cursor, date_str, stock_id, pct_change)
+                        added += 1
+                    else:
+                        if stock_name and (code, stock_name) not in all_missing_stocks:
+                            all_missing_stocks[(code, stock_name)] = pct_change
+                            added += 1  # 也计入限制
+
+                total_added += added
+                conn.commit()
+
+                import time
+                time.sleep(1.5)  # 避免请求过快
+
+            except Exception as e:
+                errors.append(f'{date_str}: {str(e)[:80]}')
+                continue
+
+        conn.close()
+        progress.setValue(total)
+
+        # 汇总信息
+        summary = f'批量获取完成！\n\n共处理 {total} 个交易日\n成功写入 {total_added} 条记录'
+        if total_skipped > 0:
+            summary += f'\n跳过（竞价一字板）{total_skipped} 条'
+        if all_missing_stocks:
+            summary += f'\n发现 {len(all_missing_stocks)} 只不在本地库的股票'
+        if errors:
+            summary += f'\n\n{len(errors)} 个日期获取失败（已跳过）：'
+            for e in errors[:5]:
+                summary += f'\n  {e}'
+
+        if all_missing_stocks:
+            summary += '\n\n是否一键创建并获取它们的板块属性？'
+            reply = QMessageBox.question(self, '批量获取完成', summary,
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                # 用最后一个交易日创建缺失股票
+                missing_list = [(c, n, p) for (c, n), p in all_missing_stocks.items()]
+                last_date = trading_dates[-1].toString('yyyy-MM-dd')
+                self._batch_create_rush_missing_stocks(missing_list, last_date)
+                QMessageBox.information(self, '完成',
+                    f'已创建 {len(all_missing_stocks)} 只新股票并获取其板块属性')
+        else:
+            QMessageBox.information(self, '批量获取完成', summary)
+
+        self.load_bidding_records()
+
+    def batch_fetch_yiziban_stocks(self):
+        """批量获取多日竞价一字板数据"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDateEdit, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('批量获取竞价一字板')
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel('起始日期:'))
+        start_date = QDateEdit()
+        start_date.setCalendarPopup(True)
+        start_date.setDate(QDate.currentDate().addDays(-5))
+        range_layout.addWidget(start_date)
+        range_layout.addWidget(QLabel('结束日期:'))
+        end_date = QDateEdit()
+        end_date.setCalendarPopup(True)
+        end_date.setDate(QDate.currentDate())
+        range_layout.addWidget(end_date)
+        layout.addLayout(range_layout)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        sd = start_date.date()
+        ed = end_date.date()
+        if sd > ed:
+            QMessageBox.warning(self, '提示', '起始日期不能晚于结束日期')
+            return
+
+        trading_dates = []
+        d = sd
+        while d <= ed:
+            if d.dayOfWeek() not in [6, 7] and not self.is_chinese_holiday(d):
+                trading_dates.append(d)
+            d = d.addDays(1)
+
+        if not trading_dates:
+            QMessageBox.warning(self, '提示', '所选区间内无交易日')
+            return
+
+        total = len(trading_dates)
+        reply = QMessageBox.question(self, '确认',
+            f'所选区间共 {total} 个交易日，将逐个获取竞价一字板数据。\n'
+            f'请确保 hexin-v 令牌有效。\n\n是否继续？',
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在批量获取...', '取消', 0, total, self)
+        progress.setWindowTitle('批量获取竞价一字板')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        total_added = 0
+        all_missing_stocks = {}
+        errors = []
+
+        for i, qdate in enumerate(trading_dates):
+            if progress.wasCanceled():
+                break
+
+            date_str = qdate.toString('yyyy-MM-dd')
+            progress.setValue(i)
+            progress.setLabelText(f'[{i+1}/{total}] {date_str}')
+
+            try:
+                datas, components = self._call_yiziban_api(qdate)
+                if not datas:
+                    continue
+
+                added = 0
+                for item in datas:
+                    code = str(item.get('code', '')).zfill(6)
+                    if not code:
+                        continue
+
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        stock_id = stock[0]
+                        cursor.execute(
+                            'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1',
+                            (date_str, stock_id))
+                        if cursor.fetchone():
+                            continue
+                        cursor.execute(
+                            'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 1, 1)',
+                            (date_str, stock_id))
+                        added += 1
+                    else:
+                        name = stock_name
+                        if not name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    name = item.get(col.get('key', ''), '')
+                                    break
+                        if name and (code, name) not in all_missing_stocks:
+                            all_missing_stocks[(code, name)] = True
+
+                total_added += added
+                conn.commit()
+
+                import time
+                time.sleep(0.5)
+            except Exception as e:
+                errors.append(f'{date_str}: {str(e)[:80]}')
+                continue
+
+        conn.close()
+        progress.setValue(total)
+
+        summary = f'批量获取完成！\n\n共处理 {total} 个交易日\n成功写入 {total_added} 条一字板记录'
+        if all_missing_stocks:
+            summary += f'\n发现 {len(all_missing_stocks)} 只不在本地库的股票'
+        if errors:
+            summary += f'\n\n{len(errors)} 个日期获取失败（已跳过）：'
+            for e in errors[:5]:
+                summary += f'\n  {e}'
+
+        if all_missing_stocks:
+            summary += '\n\n是否一键创建并获取它们的板块属性？'
+            reply = QMessageBox.question(self, '批量获取完成', summary,
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                missing_list = [(c, n, 10.0) for (c, n) in all_missing_stocks]
+                last_date = trading_dates[-1].toString('yyyy-MM-dd')
+                self._batch_create_rush_missing_stocks(missing_list, last_date)
+                QMessageBox.information(self, '完成',
+                    f'已创建 {len(all_missing_stocks)} 只新股票并获取其板块属性')
+        else:
+            QMessageBox.information(self, '批量获取完成', summary)
+
+        self.load_bidding_records()
+
+    def _call_negative_api(self, qdate):
+        """调用问财API获取指定日期竞价跌幅小于-5%的股票"""
+        qc_date = qdate.toString('yyyy.M.d')
+        question = f'{qc_date}当天竞价跌幅小于-5%，按{qc_date}当天竞价跌幅排序'
+        gain_key = f'竞价涨幅[{qdate.toString("yyyyMMdd")}]'
+
+        url = 'https://www.iwencai.com/unifiedwap/unified-wap/v2/result/get-robot-data'
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://www.iwencai.com',
+            'hexin-v': self.hexin_v,
+            'Cookie': 'chat_bot_session_id=1cb8476c0ca664fc1761430187cd06b1; other_uid=Ths_iwencai_Xuangu_946086f7d300ab583cb90ff02ea2d227',
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0'
+            ),
+        }
+        post_data = {
+            'source': 'Ths_iwencai_Xuangu',
+            'version': '2.0',
+            'query_area': '',
+            'block_list': '',
+            'add_info': '{"urp":{"scene":1,"company":1,"business":1},"contentType":"json","searchInfo":true}',
+            'question': question,
+            'perpage': '50',
+            'page': '1',
+            'secondary_intent': 'stock',
+            'log_info': '{"input_type":"typewrite"}',
+            'rsh': 'Ths_iwencai_Xuangu_pdqany9yolmgyksxprq8mpymlluypssu',
+        }
+
+        response = requests.post(url, headers=headers, data=post_data, timeout=15)
+        result = response.json()
+
+        answer = result.get('data', {}).get('answer', [])
+        if not answer:
+            raise Exception('问财接口未返回数据')
+
+        txt_list = answer[0].get('txt', [])
+        if not txt_list:
+            raise Exception('接口返回格式异常（txt为空）')
+
+        components = txt_list[0].get('content', {}).get('components', [])
+        if not components:
+            raise Exception('接口返回格式异常（components为空）')
+
+        datas = components[0].get('data', {}).get('datas', [])
+        return datas, gain_key, components
+
+    def fetch_negative_stocks(self):
+        """通过问财接口获取指定日期竞价跌幅小于-5%的股票"""
+        qdate = self.bidding_date.date()
+        date = qdate.toString('yyyy-MM-dd')
+
+        if qdate.dayOfWeek() in [6, 7]:
+            QMessageBox.warning(self, '提示', f'{date} 是周末，当天不开盘')
+            return
+        if self.is_chinese_holiday(qdate):
+            QMessageBox.warning(self, '提示', f'{date} 是法定节假日，当天不开盘')
+            return
+
+        try:
+            datas, gain_key, components = self._call_negative_api(qdate)
+            if not datas:
+                QMessageBox.warning(self, '提示', '未获取到股票数据')
+                return
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            added = 0
+            missing_stocks = []
+
+            for item in datas[:MAX_RUSH_ATTRS]:
+                code = str(item.get('code', '')).zfill(6)
+                if not code:
+                    continue
+
+                stock_name = item.get('股票名称', '') or item.get('name', '')
+                if not stock_name and components:
+                    for col in components[0].get('data', {}).get('columns', []):
+                        if col.get('label') in ('name', '股票名称'):
+                            stock_name = item.get(col.get('key', ''), '')
+                            break
+                if '*ST' in stock_name or 'ST' in stock_name:
+                    continue
+
+                cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                stock = cursor.fetchone()
+                if stock:
+                    stock_id = stock[0]
+                    cursor.execute(
+                        'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 3',
+                        (date, stock_id))
+                    if cursor.fetchone():
+                        continue
+                    cursor.execute(
+                        'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 0, 3)',
+                        (date, stock_id))
+                    added += 1
+                else:
+                    name = stock_name
+                    if not name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                name = item.get(col.get('key', ''), '')
+                                break
+                    if name:
+                        missing_stocks.append((code, name))
+
+            conn.commit()
+            conn.close()
+
+            msg = f'从问财获取到 {added} 只竞价跌幅<-5%的股票，已填入竞价负反馈列表'
+            if missing_stocks:
+                msg += f'\n\n发现 {len(missing_stocks)} 只股票不在本地库中：'
+                for mc, mn in missing_stocks[:10]:
+                    msg += f'\n  {mc} {mn}'
+                if len(missing_stocks) > 10:
+                    msg += f'\n  ...等共{len(missing_stocks)}只'
+                msg += '\n\n是否一键创建并获取它们的板块属性？'
+                reply = QMessageBox.question(self, '发现新股票', msg,
+                                             QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    missing_with_pct = [(c, n, 5.0) for c, n in missing_stocks]
+                    self._batch_create_rush_missing_stocks(missing_with_pct, date)
+                    self.load_bidding_records()
+                    QMessageBox.information(self, '完成', f'已创建 {len(missing_stocks)} 只新股票并获取其板块属性')
+            else:
+                QMessageBox.information(self, '成功', msg)
+
+            self.load_bidding_records()
+
+        except requests.exceptions.Timeout:
+            QMessageBox.warning(self, '错误', '请求超时，请检查网络')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            err_msg = str(e)
+            try:
+                err_msg += f'\n响应状态: {getattr(response, "status_code", "?")}'
+            except Exception:
+                pass
+            is_auth_error = (
+                'JSONDecodeError' in err_msg or
+                'Expecting value' in err_msg or
+                '403' in err_msg
+            )
+            if is_auth_error:
+                reply = QMessageBox.warning(self, '令牌过期',
+                    '问财接口返回异常，可能是 hexin-v 令牌已过期。\n'
+                    '是否打开输入框更新 hexin-v？',
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.hexin_v_input.setFocus()
+                    self.hexin_v_input.selectAll()
+            else:
+                QMessageBox.warning(self, '错误', f'获取数据失败: {err_msg[:200]}')
+
+    def batch_fetch_negative_stocks(self):
+        """批量获取多日竞价负反馈数据"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDateEdit, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('批量获取竞价负反馈')
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel('起始日期:'))
+        start_date = QDateEdit()
+        start_date.setCalendarPopup(True)
+        start_date.setDate(QDate.currentDate().addDays(-5))
+        range_layout.addWidget(start_date)
+        range_layout.addWidget(QLabel('结束日期:'))
+        end_date = QDateEdit()
+        end_date.setCalendarPopup(True)
+        end_date.setDate(QDate.currentDate())
+        range_layout.addWidget(end_date)
+        layout.addLayout(range_layout)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        sd = start_date.date()
+        ed = end_date.date()
+        if sd > ed:
+            QMessageBox.warning(self, '提示', '起始日期不能晚于结束日期')
+            return
+
+        trading_dates = []
+        d = sd
+        while d <= ed:
+            if d.dayOfWeek() not in [6, 7] and not self.is_chinese_holiday(d):
+                trading_dates.append(d)
+            d = d.addDays(1)
+
+        if not trading_dates:
+            QMessageBox.warning(self, '提示', '所选区间内无交易日')
+            return
+
+        total = len(trading_dates)
+        reply = QMessageBox.question(self, '确认',
+            f'所选区间共 {total} 个交易日，将逐个获取竞价负反馈数据。\n'
+            f'请确保 hexin-v 令牌有效。\n\n是否继续？',
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在批量获取...', '取消', 0, total, self)
+        progress.setWindowTitle('批量获取竞价负反馈')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        total_added = 0
+        all_missing_stocks = {}
+        errors = []
+
+        for i, qdate in enumerate(trading_dates):
+            if progress.wasCanceled():
+                break
+
+            date_str = qdate.toString('yyyy-MM-dd')
+            progress.setValue(i)
+            progress.setLabelText(f'[{i+1}/{total}] {date_str}')
+
+            try:
+                datas, gain_key, components = self._call_negative_api(qdate)
+                if not datas:
+                    continue
+
+                added = 0
+                for item in datas[:MAX_RUSH_ATTRS]:
+                    code = str(item.get('code', '')).zfill(6)
+                    if not code:
+                        continue
+
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        stock_id = stock[0]
+                        cursor.execute(
+                            'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 3',
+                            (date_str, stock_id))
+                        if cursor.fetchone():
+                            continue
+                        cursor.execute(
+                            'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 0, 3)',
+                            (date_str, stock_id))
+                        added += 1
+                    else:
+                        name = stock_name
+                        if not name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    name = item.get(col.get('key', ''), '')
+                                    break
+                        if name and (code, name) not in all_missing_stocks:
+                            all_missing_stocks[(code, name)] = True
+
+                total_added += added
+                conn.commit()
+
+                import time
+                time.sleep(0.5)
+            except Exception as e:
+                errors.append(f'{date_str}: {str(e)[:80]}')
+                continue
+
+        conn.close()
+        progress.setValue(total)
+
+        summary = f'批量获取完成！\n\n共处理 {total} 个交易日\n成功写入 {total_added} 条负反馈记录'
+        if all_missing_stocks:
+            summary += f'\n发现 {len(all_missing_stocks)} 只不在本地库的股票'
+        if errors:
+            summary += f'\n\n{len(errors)} 个日期获取失败（已跳过）：'
+            for e in errors[:5]:
+                summary += f'\n  {e}'
+
+        if all_missing_stocks:
+            summary += '\n\n是否一键创建并获取它们的板块属性？'
+            reply = QMessageBox.question(self, '批量获取完成', summary,
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                missing_list = [(c, n, 5.0) for (c, n) in all_missing_stocks]
+                last_date = trading_dates[-1].toString('yyyy-MM-dd')
+                self._batch_create_rush_missing_stocks(missing_list, last_date)
+                QMessageBox.information(self, '完成',
+                    f'已创建 {len(all_missing_stocks)} 只新股票并获取其板块属性')
+        else:
+            QMessageBox.information(self, '批量获取完成', summary)
+
+        self.load_bidding_records()
+
+    def mega_batch_fetch(self):
+        """全量批量获取：选择日期区间和数据类型（一字板/抢筹/负反馈），一次性执行，失败可重试"""
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QDateEdit,
+            QDialogButtonBox, QCheckBox, QGroupBox)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('全量批量获取')
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+
+        # 日期区间
+        date_layout = QHBoxLayout()
+        date_layout.addWidget(QLabel('起始日期:'))
+        sd = QDateEdit()
+        sd.setCalendarPopup(True)
+        sd.setDate(QDate.currentDate().addDays(-5))
+        date_layout.addWidget(sd)
+        date_layout.addWidget(QLabel('结束日期:'))
+        ed = QDateEdit()
+        ed.setCalendarPopup(True)
+        ed.setDate(QDate.currentDate())
+        date_layout.addWidget(ed)
+        layout.addLayout(date_layout)
+
+        # 数据类型选择
+        type_group = QGroupBox('选择要获取的数据类型')
+        type_layout = QVBoxLayout(type_group)
+        cb_yz = QCheckBox('竞价一字板（竞价涨停）')
+        cb_yz.setChecked(True)
+        type_layout.addWidget(cb_yz)
+        cb_qc = QCheckBox('竞价抢筹（竞价涨幅>5%）')
+        cb_qc.setChecked(True)
+        type_layout.addWidget(cb_qc)
+        cb_ff = QCheckBox('竞价负反馈（竞价跌幅<-5%）')
+        cb_ff.setChecked(True)
+        type_layout.addWidget(cb_ff)
+        layout.addWidget(type_group)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        start_date = sd.date()
+        end_date = ed.date()
+        if start_date > end_date:
+            QMessageBox.warning(self, '提示', '起始日期不能晚于结束日期')
+            return
+
+        selected = []
+        if cb_yz.isChecked():
+            selected.append('yz')
+        if cb_qc.isChecked():
+            selected.append('qc')
+        if cb_ff.isChecked():
+            selected.append('ff')
+        if not selected:
+            QMessageBox.warning(self, '提示', '请至少选择一种数据类型')
+            return
+
+        # 计算交易日
+        trading_dates = []
+        d = start_date
+        while d <= end_date:
+            if d.dayOfWeek() not in [6, 7] and not self.is_chinese_holiday(d):
+                trading_dates.append(d)
+            d = d.addDays(1)
+
+        if not trading_dates:
+            QMessageBox.warning(self, '提示', '所选区间内无交易日')
+            return
+
+        type_names = {'yz': '一字板', 'qc': '抢筹', 'ff': '负反馈'}
+        selected_names = [type_names[t] for t in selected]
+
+        reply = QMessageBox.question(self, '确认',
+            f'日期区间: {start_date.toString("yyyy-MM-dd")} ~ {end_date.toString("yyyy-MM-dd")}\n'
+            f'交易日: {len(trading_dates)} 天\n'
+            f'数据类型: {", ".join(selected_names)}\n'
+            f'总执行步数: {len(trading_dates) * len(selected)}\n\n'
+            f'请确保 hexin-v 令牌有效。\n是否继续？',
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # 构造所有步骤
+        all_steps = [(qd, t) for qd in trading_dates for t in selected]
+
+        def run_steps(steps_to_run, existing_added, existing_missing):
+            """执行指定步骤列表，返回 (失败的步骤列表, 新增added, 新增missing)"""
+            from PyQt5.QtWidgets import QProgressDialog
+            total = len(steps_to_run)
+            progress = QProgressDialog('正在全量获取...', '取消', 0, total, self)
+            progress.setWindowTitle('全量批量获取')
+            progress.setWindowModality(2)
+            progress.setMinimumDuration(0)
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            added = existing_added.copy()
+            missing = dict(existing_missing)
+            failed = []
+            step = 0
+
+            for qdate, t in steps_to_run:
+                if progress.wasCanceled():
+                    break
+
+                date_str = qdate.toString('yyyy-MM-dd')
+                progress.setValue(step)
+                progress.setLabelText(f'[{date_str}] {type_names[t]}  ({step+1}/{total})')
+
+                try:
+                    if t == 'yz':
+                        datas, components = self._call_yiziban_api(qdate)
+                        type_code = 1
+                        is_add = 1
+                    elif t == 'qc':
+                        datas, gain_key, components = self._call_rush_api(qdate)
+                        type_code = 2
+                        is_add = 1
+                    else:
+                        datas, gain_key, components = self._call_negative_api(qdate)
+                        type_code = 3
+                        is_add = 0
+
+                    if not datas:
+                        step += 1
+                        continue
+
+                    limit = None if t == 'yz' else MAX_RUSH_ATTRS
+                    added_count = 0
+                    for item in (datas if limit is None else datas[:limit]):
+                        code = str(item.get('code', '')).zfill(6)
+                        if not code:
+                            continue
+
+                        stock_name = item.get('股票名称', '') or item.get('name', '')
+                        if not stock_name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    stock_name = item.get(col.get('key', ''), '')
+                                    break
+                        if '*ST' in stock_name or 'ST' in stock_name:
+                            continue
+
+                        cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                        stock = cursor.fetchone()
+                        if stock:
+                            stock_id = stock[0]
+                            if t == 'yz':
+                                cursor.execute(
+                                    'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1',
+                                    (date_str, stock_id))
+                                if cursor.fetchone():
+                                    continue
+                                cursor.execute(
+                                    'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, ?, ?)',
+                                    (date_str, stock_id, is_add, type_code))
+                            elif t == 'qc':
+                                cursor.execute(
+                                    'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type IN (1,2)',
+                                    (date_str, stock_id))
+                                if cursor.fetchone():
+                                    continue
+                                pct = float(item.get(gain_key, 0))
+                                self._ensure_rush_stock(cursor, date_str, stock_id, pct)
+                            else:
+                                cursor.execute(
+                                    'SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 3',
+                                    (date_str, stock_id))
+                                if cursor.fetchone():
+                                    continue
+                                cursor.execute(
+                                    'INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, ?, ?)',
+                                    (date_str, stock_id, is_add, type_code))
+                            added_count += 1
+                        else:
+                            name = stock_name
+                            if not name and components:
+                                for col in components[0].get('data', {}).get('columns', []):
+                                    if col.get('label') in ('name', '股票名称'):
+                                        name = item.get(col.get('key', ''), '')
+                                        break
+                            if name and (code, name) not in missing:
+                                missing[(code, name)] = True
+
+                    added[t] = added.get(t, 0) + added_count
+                    conn.commit()
+
+                    import time
+                    time.sleep(3)
+                except Exception as e:
+                    failed.append((qdate, t))
+                    print(f'[全量批量] 失败: {date_str} {type_names[t]}: {e}')
+
+                step += 1
+
+            conn.close()
+            progress.setValue(total)
+            return failed, added, missing
+
+        # 第一轮执行所有步骤
+        failed_steps, total_added, all_missing = run_steps(all_steps, {}, {})
+
+        # 如果有失败，弹窗显示结果并提供重试
+        while failed_steps:
+            parts = [f'{type_names[t]}: {total_added.get(t, 0)}条' for t in selected]
+            summary = f'全量获取完成（部分失败）\n\n共处理 {len(all_steps)} 步\n'
+            summary += ' | '.join(parts)
+            summary += f'\n\n失败 {len(failed_steps)} 步：'
+            for qd, ft in failed_steps[:10]:
+                summary += f'\n  {qd.toString("yyyy-MM-dd")} {type_names[ft]}'
+            if len(failed_steps) > 10:
+                summary += f'\n  ...等共 {len(failed_steps)} 步'
+            if all_missing:
+                summary += f'\n\n发现 {len(all_missing)} 只不在本地库的股票'
+
+            retry_dlg = QMessageBox(self)
+            retry_dlg.setWindowTitle('全量批量获取')
+            retry_dlg.setText(summary)
+            retry_btn = retry_dlg.addButton('重试失败步骤', QMessageBox.ActionRole)
+            retry_dlg.addButton('完成（不重试）', QMessageBox.RejectRole)
+            retry_dlg.exec_()
+
+            if retry_dlg.clickedButton() == retry_btn:
+                failed_steps, total_added, all_missing = run_steps(failed_steps, total_added, all_missing)
+            else:
+                break
+
+        # 全量获取完成后，对抢筹与一字板进行去重（同一日期同只股票不应同时出现在两者中）
+        if 'qc' in selected and 'yz' in selected:
+            conn = sqlite3.connect(self.db_path)
+            removed = self._deduplicate_bidding_data(conn, trading_dates)
+            conn.close()
+            if removed > 0:
+                # 调整抢筹计数（减掉被去重的数量）
+                total_added['qc'] = max(0, total_added.get('qc', 0) - removed)
+                print(f'[全量批量] 去重完成: 共移除 {removed} 条重复抢筹记录')
+
+        # 处理缺失股票
+        if all_missing:
+            parts = [f'{type_names[t]}: {total_added.get(t, 0)}条' for t in selected]
+            summary = '全量获取完成！\n'
+            summary += ' | '.join(parts)
+            summary += f'\n发现 {len(all_missing)} 只不在本地库的股票\n\n是否一键创建并获取它们的板块属性？'
+            reply = QMessageBox.question(self, '全量获取完成', summary,
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                missing_list = [(c, n, 5.0) for (c, n) in all_missing]
+                last_date = trading_dates[-1].toString('yyyy-MM-dd')
+                self._batch_create_rush_missing_stocks(missing_list, last_date)
+                QMessageBox.information(self, '完成',
+                    f'已创建 {len(all_missing)} 只新股票并获取其板块属性')
+        else:
+            parts = [f'{type_names[t]}: {total_added.get(t, 0)}条' for t in selected]
+            summary = '全量获取完成！\n'
+            summary += ' | '.join(parts)
+            QMessageBox.information(self, '全量获取完成', summary)
+
+        self.load_bidding_records()
+
+    def onekey_fetch_all_bidding(self):
+        """一键获取当天所有竞价信息：一字板 + 抢筹 + 负反馈"""
+        qdate = self.bidding_date.date()
+        date = qdate.toString('yyyy-MM-dd')
+
+        if qdate.dayOfWeek() in [6, 7]:
+            QMessageBox.warning(self, '提示', f'{date} 是周末，当天不开盘')
+            return
+        if self.is_chinese_holiday(qdate):
+            QMessageBox.warning(self, '提示', f'{date} 是法定节假日，当天不开盘')
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在获取竞价数据...', '取消', 0, 3, self)
+        progress.setWindowTitle('一键获取全部')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        results = {'yz': 0, 'qc': 0, 'ff': 0}
+        all_missing = {}
+        errors = []
+
+        # 1. 一字板
+        try:
+            progress.setValue(0)
+            progress.setLabelText(f'[{date}] 获取竞价一字板...')
+            datas, components = self._call_yiziban_api(qdate)
+            if datas:
+                for item in datas:
+                    code = str(item.get('code', '')).zfill(6)
+                    if not code:
+                        continue
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        sid = stock[0]
+                        cursor.execute('SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1', (date, sid))
+                        if not cursor.fetchone():
+                            cursor.execute('INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 1, 1)', (date, sid))
+                            results['yz'] += 1
+                    else:
+                        name = stock_name
+                        if not name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    name = item.get(col.get('key', ''), '')
+                                    break
+                        if name and (code, name) not in all_missing:
+                            all_missing[(code, name)] = True
+            conn.commit()
+        except Exception as e:
+            errors.append(f'一字板: {str(e)[:60]}')
+
+        # 2. 抢筹
+        try:
+            progress.setValue(1)
+            progress.setLabelText(f'[{date}] 获取竞价抢筹...')
+            datas, gain_key, components = self._call_rush_api(qdate)
+            if datas:
+                n = 0
+                for item in datas:
+                    if n >= MAX_RUSH_ATTRS:
+                        break
+                    code = str(item.get('code', '')).zfill(6)
+                    pct = float(item.get(gain_key, 0))
+                    if pct < 5.0 or pct > 35.0 or not code:
+                        continue
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        sid = stock[0]
+                        cursor.execute('SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 1', (date, sid))
+                        if cursor.fetchone():
+                            continue
+                        self._ensure_rush_stock(cursor, date, sid, pct)
+                        results['qc'] += 1
+                        n += 1
+                    else:
+                        name = stock_name
+                        if not name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    name = item.get(col.get('key', ''), '')
+                                    break
+                        if name and (code, name) not in all_missing:
+                            all_missing[(code, name)] = True
+                            n += 1
+            conn.commit()
+        except Exception as e:
+            errors.append(f'抢筹: {str(e)[:60]}')
+
+        # 3. 负反馈
+        try:
+            progress.setValue(2)
+            progress.setLabelText(f'[{date}] 获取竞价负反馈...')
+            datas, gain_key, components = self._call_negative_api(qdate)
+            if datas:
+                n = 0
+                for item in datas:
+                    if n >= MAX_RUSH_ATTRS:
+                        break
+                    code = str(item.get('code', '')).zfill(6)
+                    if not code:
+                        continue
+                    stock_name = item.get('股票名称', '') or item.get('name', '')
+                    if not stock_name and components:
+                        for col in components[0].get('data', {}).get('columns', []):
+                            if col.get('label') in ('name', '股票名称'):
+                                stock_name = item.get(col.get('key', ''), '')
+                                break
+                    if '*ST' in stock_name or 'ST' in stock_name:
+                        continue
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock = cursor.fetchone()
+                    if stock:
+                        sid = stock[0]
+                        cursor.execute('SELECT id FROM bidding_records WHERE date = ? AND stock_id = ? AND type = 3', (date, sid))
+                        if not cursor.fetchone():
+                            cursor.execute('INSERT INTO bidding_records (date, stock_id, is_additive, type) VALUES (?, ?, 0, 3)', (date, sid))
+                            results['ff'] += 1
+                            n += 1
+                    else:
+                        name = stock_name
+                        if not name and components:
+                            for col in components[0].get('data', {}).get('columns', []):
+                                if col.get('label') in ('name', '股票名称'):
+                                    name = item.get(col.get('key', ''), '')
+                                    break
+                        if name and (code, name) not in all_missing:
+                            all_missing[(code, name)] = True
+                            n += 1
+            conn.commit()
+        except Exception as e:
+            errors.append(f'负反馈: {str(e)[:60]}')
+
+        conn.close()
+        progress.setValue(3)
+
+        msg = (f'获取完成！\n\n'
+               f'一字板: {results["yz"]} 只\n'
+               f'抢筹: {results["qc"]} 只\n'
+               f'负反馈: {results["ff"]} 只')
+        if all_missing:
+            msg += f'\n发现 {len(all_missing)} 只股票不在本地库中'
+        if errors:
+            msg += f'\n\n{len(errors)} 个接口异常：\n' + '\n'.join(errors)
+
+        if all_missing:
+            msg += '\n\n是否一键创建并获取它们的板块属性？'
+            reply = QMessageBox.question(self, '获取完成', msg,
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                missing_list = [(c, n, 5.0) for (c, n) in all_missing]
+                self._batch_create_rush_missing_stocks(missing_list, date)
+                QMessageBox.information(self, '完成',
+                    f'已创建 {len(all_missing)} 只新股票并获取其板块属性')
+        else:
+            QMessageBox.information(self, '获取完成', msg)
+
+        self.load_bidding_records()
 
     def analyze_bidding(self):
         try:
@@ -9285,14 +10765,26 @@ class StockMasterApp(QMainWindow):
                 for attr in attrs_by_type.get(3, set()):
                     ff_attrs[attr] = ff_attrs.get(attr, 0) - 1
 
-            # 读取竞价抢筹属性（从新表）
+            # 读取竞价抢筹股票，分析其属性
             cursor.execute('''
-                SELECT attribute, intensity
-                FROM bidding_rush_attrs
-                WHERE date = ?
-                ORDER BY intensity DESC, attribute ASC
+                SELECT s.id
+                FROM bidding_rush_stocks brs
+                JOIN stocks s ON brs.stock_id = s.id
+                WHERE brs.date = ?
+                ORDER BY brs.pct_change DESC
             ''', (date,))
-            rush_attr_records = cursor.fetchall()
+            rush_stock_ids = [row[0] for row in cursor.fetchall()]
+
+            rush_attrs = {}
+            for stock_id in rush_stock_ids:
+                cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+                for row in cursor.fetchall():
+                    attr = row[0]
+                    if attr in ATTR_REMOVE_SET:
+                        continue
+                    rush_attrs[attr] = rush_attrs.get(attr, 0) + 1
+
+            rush_attrs_sorted = sorted(rush_attrs.items(), key=lambda x: x[1], reverse=True)
 
             yz_attrs_sorted = sorted(yz_attrs.items(), key=lambda x: x[1], reverse=True)
             ff_attrs_filtered = {attr: count for attr, count in ff_attrs.items() if len(attr) > 1}
@@ -9310,13 +10802,13 @@ class StockMasterApp(QMainWindow):
             self.additive_analysis_result.setColumnWidth(0, 100)  # 属性列
             self.additive_analysis_result.setColumnWidth(1, 300)  # 来源股票列
 
-            # 显示竞价抢筹属性（从新表读取的属性和爆量倍数）
-            self.rushing_analysis_result.setRowCount(len(rush_attr_records))
-            for i, (attr, intensity) in enumerate(rush_attr_records):
+            # 显示竞价抢筹属性（从抢筹股票的属性统计得出）
+            self.rushing_analysis_result.setRowCount(len(rush_attrs_sorted))
+            for i, (attr, count) in enumerate(rush_attrs_sorted):
                 self.rushing_analysis_result.setItem(i, 0, QTableWidgetItem(attr))
-                intensity_item = QTableWidgetItem(f'{intensity:.1f}')
-                intensity_item.setTextAlignment(Qt.AlignCenter)
-                self.rushing_analysis_result.setItem(i, 1, intensity_item)
+                count_item = QTableWidgetItem(str(count))
+                count_item.setTextAlignment(Qt.AlignCenter)
+                self.rushing_analysis_result.setItem(i, 1, count_item)
 
             # 显示负反馈属性
             self.subtractive_analysis_result.setRowCount(len(ff_attrs_sorted))
@@ -9776,9 +11268,12 @@ class StockMasterApp(QMainWindow):
             self.STOCK_WEIGHT_FIRST,
             self.STOCK_WEIGHT_LAST,
             self.BOARD_WEIGHT,
-            self.RUSHING_ATTR_WEIGHT,
+            self.RUSH_ATTR_COEFFICIENT,
+            self.RUSH_PCT_COEFFICIENT,
+            self.RUSH_LETTER_ATTR_WEIGHT,
+            self.RUSH_REGION_ATTR_WEIGHT,
+            self.RUSH_MARKET_CAP_COEFFICIENT,
             self.YZ_OVERALL_WEIGHT,
-            self.LETTER_ATTR_WEIGHT,
             self.REGION_ATTR_WEIGHT,
             self.ATTR_COUNT_WEIGHT,
             self.NEGATIVE_ATTR_COUNT_WEIGHT,
@@ -9803,7 +11298,11 @@ class StockMasterApp(QMainWindow):
         for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                             ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                             ('board_weight', 'BOARD_WEIGHT'),
-                            ('rushing_attr_weight', 'RUSHING_ATTR_WEIGHT'),
+                            ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+                            ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
+                            ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
+                            ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
+                            ('rush_market_cap_coefficient', 'RUSH_MARKET_CAP_COEFFICIENT'),
                             ('yz_overall_weight', 'YZ_OVERALL_WEIGHT'),
                             ('letter_attr_weight', 'LETTER_ATTR_WEIGHT'),
                             ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
@@ -9889,152 +11388,236 @@ class StockMasterApp(QMainWindow):
                 setattr(self, _attr, _val)
             conn.close()
 
+    def _fetch_limit_up_for_date(self, target_date):
+        """核心：获取指定日期的涨停数据并写入DB，返回 (success, result_dict)"""
+        import requests, json, re
+
+        date_str = target_date.toString('yyyyMMdd')
+        date_yyyy_mm_dd = target_date.toString('yyyy-MM-dd')
+
+        today = QDate.currentDate()
+        days_to_check = 0
+        check_date = today
+        while days_to_check < 7:
+            check_date = check_date.addDays(-1)
+            if check_date.dayOfWeek() not in [6, 7]:
+                days_to_check += 1
+        is_recent = target_date >= check_date
+
+        if is_recent:
+            stocks_by_lbc, source = self._fetch_from_eastmoney(date_str)
+        else:
+            stocks_by_lbc, source = self._fetch_from_backup(date_str)
+
+        if not stocks_by_lbc:
+            return False, {'reason': '未获取到涨停数据'}
+
+        max_lbc = max(stocks_by_lbc.keys())
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('SELECT id FROM ladder_nodes WHERE date = ?', (date_yyyy_mm_dd,))
+            node_ids = [row[0] for row in cursor.fetchall()]
+            for node_id in node_ids:
+                cursor.execute('DELETE FROM ladder_stocks WHERE ladder_node_id = ?', (node_id,))
+            cursor.execute('DELETE FROM ladder_nodes WHERE date = ?', (date_yyyy_mm_dd,))
+
+            cursor.execute('REPLACE INTO ladder_settings (date, ladder_count) VALUES (?, ?)',
+                           (date_yyyy_mm_dd, max_lbc))
+
+            added_count = 0
+            skipped_count = 0
+            skipped_codes = []
+
+            for lbc in sorted(stocks_by_lbc.keys(), reverse=True):
+                node_level = max_lbc - lbc + 1
+                stocks = stocks_by_lbc[lbc]
+
+                cursor.execute('INSERT INTO ladder_nodes (date, node_level) VALUES (?, ?)',
+                               (date_yyyy_mm_dd, node_level))
+                node_id = cursor.lastrowid
+
+                order_index = 0
+                for code in stocks:
+                    cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
+                    stock_result = cursor.fetchone()
+                    if stock_result:
+                        stock_id = stock_result[0]
+                        cursor.execute('INSERT INTO ladder_stocks (ladder_node_id, stock_id, order_index) VALUES (?, ?, ?)',
+                                       (node_id, stock_id, order_index))
+                        order_index += 1
+                        added_count += 1
+                    else:
+                        skipped_count += 1
+                        skipped_codes.append(code)
+
+            yesterday = target_date.addDays(-1)
+            yesterday_str = yesterday.toString('yyyy-MM-dd')
+            cursor.execute('SELECT ladder_count FROM ladder_settings WHERE date = ?', (yesterday_str,))
+            yesterday_setting = cursor.fetchone()
+            yesterday_max_lbc = yesterday_setting[0] if yesterday_setting else 0
+            if yesterday_max_lbc > 0:
+                cursor.execute('SELECT node_level, node_name FROM ladder_nodes WHERE date = ? AND node_name IS NOT NULL AND node_name != ""', (yesterday_str,))
+                yesterday_nodes = cursor.fetchall()
+                if yesterday_nodes:
+                    yesterday_board_to_name = {}
+                    for nl, name in yesterday_nodes:
+                        board_count = yesterday_max_lbc - nl + 1
+                        yesterday_board_to_name[board_count] = name
+                    for today_nl in range(1, max_lbc + 1):
+                        today_board = max_lbc - today_nl + 1
+                        target_yesterday_board = today_board - 1
+                        if target_yesterday_board in yesterday_board_to_name:
+                            node_name = yesterday_board_to_name[target_yesterday_board]
+                            cursor.execute('UPDATE ladder_nodes SET node_name = ? WHERE date = ? AND node_level = ? AND (node_name IS NULL OR node_name = "")',
+                                           (node_name, date_yyyy_mm_dd, today_nl))
+
+            conn.commit()
+
+            total_stocks = sum(len(stocks) for stocks in stocks_by_lbc.values())
+            return True, {
+                'source': source,
+                'total_stocks': total_stocks,
+                'added_count': added_count,
+                'max_lbc': max_lbc,
+                'skipped_count': skipped_count,
+                'skipped_codes': skipped_codes,
+            }
+        except Exception as e:
+            conn.rollback()
+            return False, {'reason': str(e)}
+        finally:
+            conn.close()
+
     def auto_get_limit_up_data(self):
         """自动获取涨停数据（优先使用东方财富接口，更早数据使用备用接口）"""
         try:
-            import requests
-            import json
-            import re
-            
             target_date = self.limit_up_date.date()
-            date_str = target_date.toString('yyyyMMdd')
-            date_yyyy_mm_dd = target_date.toString('yyyy-MM-dd')
-            
-            # 判断是否在最近7个交易日内
-            today = QDate.currentDate()
-            days_diff = today.daysTo(target_date)
-            
-            # 计算最近7个交易日（跳过周末）
-            days_to_check = 0
-            check_date = today
-            while days_to_check < 7:
-                check_date = check_date.addDays(-1)
-                # 跳过周末
-                if check_date.dayOfWeek() not in [6, 7]:
-                    days_to_check += 1
-            
-            # 判断目标日期是否在最近7个交易日内
-            is_recent = target_date >= check_date
-            
+
             self.auto_get_limit_up_btn.setEnabled(False)
             self.auto_get_limit_up_btn.setText('获取中...')
-            
-            try:
-                if is_recent:
-                    # 使用东方财富接口（最近7个交易日）
-                    stocks_by_lbc, source = self._fetch_from_eastmoney(date_str)
-                else:
-                    # 使用备用接口（更早数据）
-                    stocks_by_lbc, source = self._fetch_from_backup(date_str)
-                
-                if not stocks_by_lbc:
-                    QMessageBox.information(self, '提示', '未获取到涨停股票数据')
-                    return
-                
-                # 获取最大连板数
-                max_lbc = max(stocks_by_lbc.keys())
-                
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                
-                try:
-                    # 先清空当天的梯队数据
-                    cursor.execute('SELECT id FROM ladder_nodes WHERE date = ?', (date_yyyy_mm_dd,))
-                    node_ids = [row[0] for row in cursor.fetchall()]
-                    for node_id in node_ids:
-                        cursor.execute('DELETE FROM ladder_stocks WHERE ladder_node_id = ?', (node_id,))
-                    cursor.execute('DELETE FROM ladder_nodes WHERE date = ?', (date_yyyy_mm_dd,))
-                    
-                    # 创建梯队设置
-                    cursor.execute('REPLACE INTO ladder_settings (date, ladder_count) VALUES (?, ?)', 
-                                (date_yyyy_mm_dd, max_lbc))
-                    
-                    added_count = 0
-                    skipped_count = 0
-                    skipped_codes = []  # 记录未导入的股票代码
-                    
-                    # 按连板数从高到低创建梯队节点（node_level=1为最高板）
-                    for lbc in sorted(stocks_by_lbc.keys(), reverse=True):
-                        node_level = max_lbc - lbc + 1
-                        stocks = stocks_by_lbc[lbc]
-                        
-                        # 创建梯队节点
-                        cursor.execute('INSERT INTO ladder_nodes (date, node_level) VALUES (?, ?)', 
-                                    (date_yyyy_mm_dd, node_level))
-                        node_id = cursor.lastrowid
-                        
-                        order_index = 0
-                        for code in stocks:
-                            # 查找股票
-                            cursor.execute('SELECT id FROM stocks WHERE code = ?', (code,))
-                            stock_result = cursor.fetchone()
-                            if stock_result:
-                                stock_id = stock_result[0]
-                                cursor.execute('INSERT INTO ladder_stocks (ladder_node_id, stock_id, order_index) VALUES (?, ?, ?)', 
-                                            (node_id, stock_id, order_index))
-                                order_index += 1
-                                added_count += 1
-                            else:
-                                skipped_count += 1
-                                skipped_codes.append(code)
-                    
-                    # 自动填充昨天的节点名称（今天的N板对应昨天的N-1板）
-                    yesterday = target_date.addDays(-1)
-                    yesterday_str = yesterday.toString('yyyy-MM-dd')
-                    # 获取昨天的最高连板数
-                    cursor.execute('SELECT ladder_count FROM ladder_settings WHERE date = ?', (yesterday_str,))
-                    yesterday_setting = cursor.fetchone()
-                    yesterday_max_lbc = yesterday_setting[0] if yesterday_setting else 0
-                    if yesterday_max_lbc > 0:
-                        # 获取昨天有节点名称的梯队
-                        cursor.execute('SELECT node_level, node_name FROM ladder_nodes WHERE date = ? AND node_name IS NOT NULL AND node_name != ""', (yesterday_str,))
-                        yesterday_nodes = cursor.fetchall()
-                        if yesterday_nodes:
-                            # 将昨天的数据转为 {board_count: node_name} 映射
-                            yesterday_board_to_name = {}
-                            for nl, name in yesterday_nodes:
-                                board_count = yesterday_max_lbc - nl + 1
-                                yesterday_board_to_name[board_count] = name
-                            # 今天的N板对应昨天的N-1板
-                            for today_nl in range(1, max_lbc + 1):
-                                today_board = max_lbc - today_nl + 1
-                                target_yesterday_board = today_board - 1
-                                if target_yesterday_board in yesterday_board_to_name:
-                                    node_name = yesterday_board_to_name[target_yesterday_board]
-                                    cursor.execute('UPDATE ladder_nodes SET node_name = ? WHERE date = ? AND node_level = ? AND (node_name IS NULL OR node_name = "")',
-                                                 (node_name, date_yyyy_mm_dd, today_nl))
-                    
-                    conn.commit()
-                    
-                    total_stocks = sum(len(stocks) for stocks in stocks_by_lbc.values())
-                    
-                    # 构建提示消息
-                    msg = f'成功获取涨停数据！\n\n数据源: {source}\n共 {total_stocks} 只涨停股票\n成功导入 {added_count} 只\n最高连板: {max_lbc} 板'
-                    
-                    if skipped_count > 0:
-                        msg += f'\n\n跳过 {skipped_count} 只（未在股票列表中）:\n{", ".join(skipped_codes)}'
-                    
-                    QMessageBox.information(self, '获取成功', msg)
-                    
-                    # 重新加载数据
-                    self.load_limit_up_data()
-                    
-                except Exception as e:
-                    conn.rollback()
-                    QMessageBox.warning(self, '导入失败', f'导入过程中发生错误: {str(e)}')
-                finally:
-                    conn.close()
-                    
-            except requests.exceptions.RequestException as e:
-                QMessageBox.warning(self, '获取失败', f'网络请求失败: {str(e)}')
-            finally:
-                self.auto_get_limit_up_btn.setEnabled(True)
-                self.auto_get_limit_up_btn.setText('自动获取涨停数据')
-                
+
+            success, result = self._fetch_limit_up_for_date(target_date)
+
+            if not success:
+                QMessageBox.information(self, '提示', result.get('reason', '获取失败'))
+                return
+
+            msg = (f'成功获取涨停数据！\n\n数据源: {result["source"]}\n'
+                   f'共 {result["total_stocks"]} 只涨停股票\n'
+                   f'成功导入 {result["added_count"]} 只\n'
+                   f'最高连板: {result["max_lbc"]} 板')
+            if result['skipped_count'] > 0:
+                msg += f'\n\n跳过 {result["skipped_count"]} 只（未在股票列表中）:\n{", ".join(result["skipped_codes"])}'
+
+            QMessageBox.information(self, '获取成功', msg)
+            self.load_limit_up_data()
         except Exception as e:
-            QMessageBox.warning(self, '错误', f'发生未知错误: {str(e)}')
+            QMessageBox.warning(self, '错误', f'获取失败: {str(e)}')
+        finally:
             self.auto_get_limit_up_btn.setEnabled(True)
             self.auto_get_limit_up_btn.setText('自动获取涨停数据')
+
+    def batch_fetch_limit_up_data(self):
+        """批量获取多日涨停梯队数据"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDateEdit, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('批量获取涨停梯队')
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel('起始日期:'))
+        start_date = QDateEdit()
+        start_date.setCalendarPopup(True)
+        start_date.setDate(QDate.currentDate().addDays(-5))
+        range_layout.addWidget(start_date)
+        range_layout.addWidget(QLabel('结束日期:'))
+        end_date = QDateEdit()
+        end_date.setCalendarPopup(True)
+        end_date.setDate(QDate.currentDate())
+        range_layout.addWidget(end_date)
+        layout.addLayout(range_layout)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        sd = start_date.date()
+        ed = end_date.date()
+        if sd > ed:
+            QMessageBox.warning(self, '提示', '起始日期不能晚于结束日期')
+            return
+
+        trading_dates = []
+        d = sd
+        while d <= ed:
+            if d.dayOfWeek() not in [6, 7] and not self.is_chinese_holiday(d):
+                trading_dates.append(d)
+            d = d.addDays(1)
+
+        if not trading_dates:
+            QMessageBox.warning(self, '提示', '所选区间内无交易日')
+            return
+
+        total = len(trading_dates)
+        reply = QMessageBox.question(self, '确认',
+            f'所选区间共 {total} 个交易日，将逐个获取涨停数据。\n\n是否继续？',
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在批量获取涨停数据...', '取消', 0, total, self)
+        progress.setWindowTitle('批量获取涨停梯队')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        success_count = 0
+        total_added = 0
+        total_skipped = 0
+        errors = []
+
+        for i, qdate in enumerate(trading_dates):
+            if progress.wasCanceled():
+                break
+
+            date_str = qdate.toString('yyyy-MM-dd')
+            progress.setValue(i)
+            progress.setLabelText(f'[{i+1}/{total}] {date_str}')
+
+            try:
+                success, result = self._fetch_limit_up_for_date(qdate)
+                if success:
+                    success_count += 1
+                    total_added += result['added_count']
+                    total_skipped += result['skipped_count']
+                else:
+                    errors.append(f'{date_str}: {result.get("reason", "未知错误")[:60]}')
+            except Exception as e:
+                errors.append(f'{date_str}: {str(e)[:60]}')
+
+            import time
+            time.sleep(1.5)
+
+        progress.setValue(total)
+
+        summary = f'批量获取完成！\n\n成功获取 {success_count}/{total} 个交易日\n共导入 {total_added} 只股票'
+        if total_skipped > 0:
+            summary += f'\n跳过（未在股票列表）{total_skipped} 只'
+        if errors:
+            summary += f'\n\n{len(errors)} 个日期失败：'
+            for e in errors[:8]:
+                summary += f'\n  {e}'
+
+        QMessageBox.information(self, '批量获取完成', summary)
+        self.load_limit_up_data()
 
     def show_ladder_attr_summary(self):
         from PyQt5.QtWidgets import QDialog, QTextEdit, QVBoxLayout, QPushButton, QHBoxLayout, QLabel, QFrame
@@ -10525,6 +12108,143 @@ class StockMasterApp(QMainWindow):
         finally:
             self.get_holder_ratio_btn.setEnabled(True)
             self.get_holder_ratio_btn.setText('获取股票股本')
+
+    def refresh_stock_attributes(self):
+        """弹窗输入多个股票代码，刷新其板块属性"""
+        from PyQt5.QtWidgets import QInputDialog, QTextEdit, QVBoxLayout, QDialog, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('刷新股票属性')
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('输入股票代码（多个用逗号、空格或换行分隔）：'))
+
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText('例如：600519, 000858, 920199')
+        text_edit.setMaximumHeight(120)
+        layout.addWidget(text_edit)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        raw = text_edit.toPlainText().strip()
+        if not raw:
+            return
+
+        # 解析代码：去掉空格、逗号、换行，取6位数字
+        codes = re.findall(r'(\d{6})', raw)
+        if not codes:
+            QMessageBox.warning(self, '提示', '未识别到有效的股票代码')
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        missing_codes = []
+        found_stocks = []
+        for code in codes:
+            cursor.execute('SELECT id, name, code FROM stocks WHERE code = ?', (code,))
+            row = cursor.fetchone()
+            if row:
+                found_stocks.append((row[0], row[1], code))
+            else:
+                missing_codes.append(code)
+
+        if not found_stocks:
+            QMessageBox.warning(self, '提示', '这些股票代码在本地库中不存在，请先添加股票')
+            conn.close()
+            return
+
+        msg = f'将从东方财富获取 {len(found_stocks)} 只股票的板块属性并覆盖保存'
+        if missing_codes:
+            msg += f'\n\n以下 {len(missing_codes)} 个代码不在本地库中，已跳过：\n' + ', '.join(missing_codes)
+        reply = QMessageBox.question(self, '确认', msg,
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            conn.close()
+            return
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog('正在获取板块属性...', '取消', 0, len(found_stocks), self)
+        progress.setWindowTitle('刷新属性')
+        progress.setWindowModality(2)
+        progress.setMinimumDuration(0)
+
+        headers = {
+            'Accept': '*/*',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        for i, (stock_id, name, code) in enumerate(found_stocks):
+            if progress.wasCanceled():
+                break
+
+            progress.setValue(i)
+            progress.setLabelText(f'正在处理 {name}({code})  ({i+1}/{len(found_stocks)})')
+
+            try:
+                if code.startswith('920'):
+                    market = 'BJ'
+                elif code.startswith('60') or code.startswith('688'):
+                    market = 'SH'
+                else:
+                    market = 'SZ'
+                secucode = f'{code}.{market}'
+
+                board_names = []
+                url = (
+                    "https://datacenter.eastmoney.com/securities/api/data/v1/get?"
+                    "reportName=RPT_F10_CORETHEME_BOARDTYPE&"
+                    "columns=SECUCODE,SECURITY_CODE,SECURITY_NAME_ABBR,NEW_BOARD_CODE,BOARD_NAME,SELECTED_BOARD_REASON,IS_PRECISE,BOARD_RANK,BOARD_YIELD,DERIVE_BOARD_CODE&"
+                    f"filter=(SECUCODE%3D%22{secucode}%22)(IS_PRECISE%3D%221%22)&"
+                    "pageNumber=1&pageSize=200&sortTypes=1&sortColumns=BOARD_RANK&"
+                    "source=HSF10&client=PC&v=05407725378079107"
+                )
+                resp = requests.get(url, headers=headers, timeout=10)
+                data = resp.json()
+                for item in (data.get('result') or {}).get('data', []):
+                    bn = item.get('BOARD_NAME', '')
+                    if bn and bn not in board_names:
+                        board_names.append(bn)
+
+                url2 = (
+                    "https://datacenter.eastmoney.com/securities/api/data/get?"
+                    "type=RPT_F10_CORETHEME_BOARDTYPE&sty=ALL&"
+                    f"filter=(SECUCODE%3D%22{secucode}%22)&"
+                    "p=1&ps=200&sr=1&st=BOARD_RANK&"
+                    "source=HSF10&client=PC&v=04828710067581792"
+                )
+                resp2 = requests.get(url2, headers=headers, timeout=10)
+                data2 = resp2.json()
+                for item in data2.get('result', {}).get('data', []):
+                    bn = item.get('BOARD_NAME', '')
+                    if bn and bn not in board_names:
+                        board_names.append(bn)
+
+                # 合并保存：保留旧属性，新增不存在的属性
+                today = datetime.now().strftime('%Y-%m-%d')
+                for board_name in board_names:
+                    cursor.execute(
+                        'SELECT id FROM stock_attributes WHERE stock_id = ? AND attribute = ?',
+                        (stock_id, board_name))
+                    if not cursor.fetchone():
+                        cursor.execute(
+                            'INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
+                            (stock_id, today, board_name)
+                        )
+                conn.commit()
+            except Exception as e:
+                print(f'刷新 {code} 属性失败: {e}')
+
+        conn.close()
+        progress.setValue(len(found_stocks))
+        QMessageBox.information(self, '完成', f'已刷新 {len(found_stocks)} 只股票的板块属性')
 
     def get_total_market_cap_data(self):
         """获取股票总市值数据"""
