@@ -379,6 +379,9 @@ class StockMasterApp(QMainWindow):
             if 'rush_market_cap_coefficient' not in columns:
                 cursor.execute('ALTER TABLE backtest_results ADD COLUMN rush_market_cap_coefficient REAL NOT NULL DEFAULT 0.01')
 
+            if 'rush_pct_coefficient' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN rush_pct_coefficient REAL NOT NULL DEFAULT 0.2')
+
         except Exception as e:
             print(f"Error altering table: {e}")
 

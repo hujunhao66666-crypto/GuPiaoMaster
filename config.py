@@ -72,9 +72,9 @@ BAYESIAN_BOUNDS = {
     'region_attr_weight': (0.2730, 0.2780),  # 地区属性系数
     'attr_count_weight': (0.0167, 0.0167),  # 属性数量差距系数
     'negative_attr_count_weight': (2.0266, 2.0294),  # 负反馈属性数量差距系数
-    'negative_attr_weight': (180.0, 210.0),  # 负反馈其他属性系数
-    'negative_letter_attr_weight': (180.0, 210.0),  # 负反馈字母属性系数
-    'negative_region_attr_weight': (180.0, 210.0),  # 负反馈地区属性系数
+    'negative_attr_weight': (100.0, 300.0),  # 负反馈其他属性系数
+    'negative_letter_attr_weight': (100.0, 300.0),  # 负反馈字母属性系数
+    'negative_region_attr_weight': (100.0, 300.0),  # 负反馈地区属性系数
     'board_press_weight': (118.0582, 118.2321),  # 同板压制系数
     'node_guide_weight': (0.0336, 0.0336),  # 节点指引系数
     'holder_ratio_weight': (0.0100, 0.0100),  # 股东持股比例权重系数
