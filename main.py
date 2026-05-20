@@ -5207,18 +5207,20 @@ class StockMasterApp(QMainWindow):
                 rows.append((f'  {attr}', f'{attr_score:.4f}'))
 
             rows.append(('', ''))
-            rows.append(('=== 竞价负反馈属性 ===', ''))
+            rows.append(('=== 竞价负反馈属性（字母系数）===', ''))
+            attr_scores_ff_letter = details.get('attr_scores_ff_letter', {})
+            for attr, attr_score in sorted(attr_scores_ff_letter.items()):
+                rows.append((f'  {attr}', f'{attr_score:.4f}'))
 
-            # 竞价负反馈属性得分
-            attr_scores_ff = details.get('attr_scores_ff', {})
-            matching_attrs_ff = details.get('matching_attrs_ff', [])
-            negative_attrs = details.get('negative_attrs', [])
+            rows.append(('=== 竞价负反馈属性（地区系数）===', ''))
+            attr_scores_ff_region = details.get('attr_scores_ff_region', {})
+            for attr, attr_score in sorted(attr_scores_ff_region.items()):
+                rows.append((f'  {attr}', f'{attr_score:.4f}'))
 
-            for attr in matching_attrs_ff:
-                attr_score = attr_scores_ff.get(attr, 0)
-                is_negative = attr in negative_attrs
-                sign = '(-)' if is_negative else '(+)'
-                rows.append((f'  {attr}', f'{attr_score:.4f} {sign}'))
+            rows.append(('=== 竞价负反馈属性（其他系数）===', ''))
+            attr_scores_ff_other = details.get('attr_scores_ff_other', {})
+            for attr, attr_score in sorted(attr_scores_ff_other.items()):
+                rows.append((f'  {attr}', f'{attr_score:.4f}'))
 
             # 属性得分汇总
             attr_total_score = details.get('attr_total_score', 0)
@@ -5229,12 +5231,14 @@ class StockMasterApp(QMainWindow):
             qc_region_total = sum(details.get('attr_scores_qc_region', {}).values())
             qc_other_total = sum(details.get('attr_scores_qc', {}).values())
             qc_total = qc_letter_total + qc_region_total + qc_other_total
-            ff_total = sum(details.get('attr_scores_ff', {}).values())
+            ff_letter_total = sum(details.get('attr_scores_ff_letter', {}).values())
+            ff_region_total = sum(details.get('attr_scores_ff_region', {}).values())
+            ff_other_total = sum(details.get('attr_scores_ff_other', {}).values())
             
             rows.append(('', ''))
             rows.append(('=== 属性得分汇总 ===', ''))
             rows.append(('  属性得分总和', f"{attr_total_score:.4f}"))
-            rows.append(('    = 一字板({:.4f}) + 字母({:.4f}) + 地区({:.4f}) + 抢筹字母({:.4f}) + 抢筹地区({:.4f}) + 抢筹其他({:.4f}) + 负反馈({:.4f})'.format(yz_total, letter_total, region_total, qc_letter_total, qc_region_total, qc_other_total, ff_total), ''))
+            rows.append(('    = 一字板({:.4f}) + 字母({:.4f}) + 地区({:.4f}) + 抢筹字母({:.4f}) + 抢筹地区({:.4f}) + 抢筹其他({:.4f}) + 负反馈字母({:.4f}) + 负反馈地区({:.4f}) + 负反馈其他({:.4f})'.format(yz_total, letter_total, region_total, qc_letter_total, qc_region_total, qc_other_total, ff_letter_total, ff_region_total, ff_other_total), ''))
             
             # 股东持股比例得分
             rows.append(('', ''))
@@ -5919,6 +5923,9 @@ class StockMasterApp(QMainWindow):
                     attr_scores_qc_letter = {}  # 抢筹字母属性得分
                     attr_scores_qc_region = {}  # 抢筹地区属性得分
                     attr_scores_ff = {}  # 负反馈属性得分
+                    attr_scores_ff_letter = {}  # 负反馈字母属性
+                    attr_scores_ff_region = {}  # 负反馈地区属性
+                    attr_scores_ff_other = {}  # 负反馈其他属性
                     for attr in stock_attrs:
                         if attr in attr_weighted_count_yz and attr in attr_weighted_count:
                             attr_score = attr_weighted_count_yz[attr] / NORM_YZ_SCORE
@@ -5957,6 +5964,13 @@ class StockMasterApp(QMainWindow):
                             attr_scores_ff[attr] = attr_score
                             if attr_score < 0:
                                 negative_attrs.append(attr)
+                            # 按分类保存用于显示区分
+                            if len(attr) == 1 and attr.isalpha():
+                                attr_scores_ff_letter[attr] = attr_score
+                            elif attr in REGION_NAMES:
+                                attr_scores_ff_region[attr] = attr_score
+                            else:
+                                attr_scores_ff_other[attr] = attr_score
 
                     # 负反馈整体系数已在属性计算时应用
                     negative_overall_factor = 1.0
@@ -6029,6 +6043,9 @@ class StockMasterApp(QMainWindow):
                         'attr_scores_qc_letter': attr_scores_qc_letter,
                         'attr_scores_qc_region': attr_scores_qc_region,
                         'attr_scores_ff': attr_scores_ff,
+                        'attr_scores_ff_letter': attr_scores_ff_letter,
+                        'attr_scores_ff_region': attr_scores_ff_region,
+                        'attr_scores_ff_other': attr_scores_ff_other,
                         'matching_attrs_yz': matching_attrs_yz,
                         'matching_attrs_letter': matching_attrs_letter,
                         'matching_attrs_region': matching_attrs_region,
