@@ -1,43 +1,44 @@
 # 加权系数配置文件
 # 所有系数都在这里定义，可以直接修改
+import re
 
 class Coefficients:
     # 股票权重配置
-    STOCK_WEIGHT_FIRST = 1.8834000000000000      # 第一个股票的权重
-    STOCK_WEIGHT_LAST = 0.6819000000000      # 最后一个股票的权重
+    STOCK_WEIGHT_FIRST = 1.8834      # 第一个股票的权重
+    STOCK_WEIGHT_LAST = 0.6819     # 最后一个股票的权重
     # 板数相关系数
-    BOARD_WEIGHT = 75.01080000000        # 每板的权重（× normalized board_count 0.05~1）
+    BOARD_WEIGHT = 75.0108      # 每板的权重（× normalized board_count 0.05~1）
     # 创业板系数
     GEM_FACTOR = 2.0              # 创业板股票系数（300开头）
-    # 竞价抢筹属性总系数 a：抢筹加分 = (涨幅1*b + 涨幅2*b + ...) * a
-    RUSH_ATTR_COEFFICIENT = 0.0200000000000000     # 竞价抢筹属性总系数 a
     # 涨幅系数 b：每只抢筹股票的涨幅权重
-    RUSH_PCT_COEFFICIENT = 0.2000000000000000       # 涨幅系数 b
+    RUSH_PCT_COEFFICIENT = 0.1888       # 涨幅系数 b
     # 一字板相关系数
-    YZ_OVERALL_WEIGHT = 0.1306000000000       # 一字板整体系数（归一化后每次命中约+0.5分）
+    YZ_OVERALL_WEIGHT = 0.1306      # 一字板整体系数（归一化后每次命中约+0.5分）
     # 字母属性系数（拼音首字母，如Z、F、J、K等）
-    LETTER_ATTR_WEIGHT = 2.4509000000000000      # 字母属性系数
+    LETTER_ATTR_WEIGHT = 2.4509000      # 字母属性系数
     # 竞价抢筹字母属性系数
-    RUSH_LETTER_ATTR_WEIGHT = 0.0200000000000000  # 抢筹字母属性系数
+    RUSH_LETTER_ATTR_WEIGHT = 0.0315  # 抢筹字母属性系数
     # 地区属性系数（如浙江、江苏、广东等）
-    REGION_ATTR_WEIGHT = 0.2744000000000000      # 地区属性系数
+    REGION_ATTR_WEIGHT = 0.2744      # 地区属性系数
     # 竞价抢筹地区属性系数
-    RUSH_REGION_ATTR_WEIGHT = 0.0200000000000000  # 抢筹地区属性系数
+    RUSH_REGION_ATTR_WEIGHT = 0.0291  # 抢筹地区属性系数
     # 竞价抢筹市值系数：抢筹加分乘以(市值(亿) × 系数)
-    RUSH_MARKET_CAP_COEFFICIENT = 0.0100000000000000  # 抢筹市值系数
+    RUSH_MARKET_CAP_COEFFICIENT = 0.0591  # 抢筹市值系数
     # 属性数量差距系数
     ATTR_COUNT_WEIGHT = 0.016700000000      # 属性数量差距系数（指数，0=无放大，1=线性）
     # 负反馈相关系数
-    NEGATIVE_ATTR_COUNT_WEIGHT = 2.030200000000000000  # 负反馈属性数量差距系数（指数）
-    NEGATIVE_OVERALL_WEIGHT = 196.7869000000000       # 负反馈整体系数（归一化后每次命中约-0.2分）
+    NEGATIVE_ATTR_COUNT_WEIGHT = 2.0302000  # 负反馈属性数量差距系数（指数）
+    NEGATIVE_ATTR_WEIGHT = 196.7869000      # 负反馈其他属性系数
+    NEGATIVE_LETTER_ATTR_WEIGHT = 196.7869000  # 负反馈字母属性系数
+    NEGATIVE_REGION_ATTR_WEIGHT = 196.7869000  # 负反馈地区属性系数
     # 节点相关系数
-    BOARD_PRESS_WEIGHT = 118.2477000      # 同板压制系数（直接加分项）
-    NODE_GUIDE_WEIGHT = 0.0336000000000      # 节点指引系数（直接加分项）
+    BOARD_PRESS_WEIGHT = 118.2477      # 同板压制系数（直接加分项）
+    NODE_GUIDE_WEIGHT = 0.033600      # 节点指引系数（直接加分项）
     # 股东持股比例权重系数
-    HOLDER_RATIO_WEIGHT = 0.010000000000000    # 股东持股比例权重系数（× 归一化比例0~1）
+    HOLDER_RATIO_WEIGHT = 0.0100000000000000000    # 股东持股比例权重系数（× 归一化比例0~1）
     # 市值权重系数
-    MARKET_CAP_WEIGHT = 0.021700000000000      # 市值权重系数（× 归一化市值^指数，市值单位为亿）
-    MARKET_CAP_EXPONENT = 0.7347000000000000    # 市值指数（<1 边际递减，=1 线性，>1 边际递增）
+    MARKET_CAP_WEIGHT = 0.0217      # 市值权重系数（× 归一化市值^指数，市值单位为亿）
+    MARKET_CAP_EXPONENT = 0.7347    # 市值指数（<1 边际递减，=1 线性，>1 边际递增）
     # 回测排名得分配置（第N名命中涨停梯队时的得分）
     BACKTEST_RANK_SCORES = {
         1: 32,   # 第1名命中得分
@@ -59,25 +60,26 @@ REGION_NAMES = {
 
 # 贝叶斯优化参数搜索范围
 BAYESIAN_BOUNDS = {
-    'stock_weight_first': (1.7834, 1.9834),  # 第一个股票的权重
-    'stock_weight_last': (0.6369, 0.7269),  # 最后一个股票的权重
-    'board_weight': (75.0358, 75.1235),  # 每板的权重
-    'rush_attr_coefficient': (0.0050, 0.1000),  # 竞价抢筹属性总系数 a（弱线性+非线性）
-    'rush_pct_coefficient': (0.0100, 1.0000),   # 涨幅系数 b（非线性相关）
-    'rush_letter_attr_weight': (0.0, 0.0300),  # 抢筹字母属性系数（弱相关→收窄到近零区）
-    'rush_region_attr_weight': (0.0050, 0.1000),  # 抢筹地区属性系数（非线性相关）
-    'rush_market_cap_coefficient': (0.0010, 0.1000),  # 抢筹市值系数（非线性相关）
-    'yz_overall_weight': (0.1306, 0.1308),  # 一字板整体系数
-    'letter_attr_weight': (2.4501, 2.4517),  # 字母属性系数
-    'region_attr_weight': (0.2494, 0.2994),  # 地区属性系数
+    'stock_weight_first': (1.9295, 2.1295),  # 第一个股票的权重
+    'stock_weight_last': (0.6872, 0.7772),  # 最后一个股票的权重
+    'board_weight': (74.9850, 75.0358),  # 每板的权重
+    'rush_pct_coefficient': (0.1094, 0.2084),  # 涨幅系数 b
+    'rush_letter_attr_weight': (0.0260, 0.0290),  # 抢筹字母属性系数
+    'rush_region_attr_weight': (0.0227, 0.0323),  # 抢筹地区属性系数
+    'rush_market_cap_coefficient': (0.0509, 0.0609),  # 抢筹市值系数
+    'yz_overall_weight': (0.1305, 0.1306),  # 一字板整体系数
+    'letter_attr_weight': (2.4467, 2.4501),  # 字母属性系数
+    'region_attr_weight': (0.2730, 0.2780),  # 地区属性系数
     'attr_count_weight': (0.0167, 0.0167),  # 属性数量差距系数
-    'negative_attr_count_weight': (2.0294, 2.0309),  # 负反馈属性数量差距系数
-    'negative_overall_weight': (196.8613, 197.0823),  # 负反馈整体系数
-    'board_press_weight': (118.2321, 118.2633),  # 同板压制系数
-    'node_guide_weight': (0.0336, 0.0337),  # 节点指引系数
+    'negative_attr_count_weight': (2.0266, 2.0294),  # 负反馈属性数量差距系数
+    'negative_attr_weight': (180.0, 210.0),  # 负反馈其他属性系数
+    'negative_letter_attr_weight': (180.0, 210.0),  # 负反馈字母属性系数
+    'negative_region_attr_weight': (180.0, 210.0),  # 负反馈地区属性系数
+    'board_press_weight': (118.0582, 118.2321),  # 同板压制系数
+    'node_guide_weight': (0.0336, 0.0336),  # 节点指引系数
     'holder_ratio_weight': (0.0100, 0.0100),  # 股东持股比例权重系数
-    'market_cap_weight': (0.0100, 0.0612),  # 
-    'market_cap_exponent': (0.7022, 0.7672),  # 
+    'market_cap_weight': (0.0531, 0.0583),  # 
+    'market_cap_exponent': (0.7341, 0.7373),  # 
 }
 
 # 自适应区间收缩配置
@@ -145,13 +147,28 @@ ATTR_REMOVE_SET = {
     '融资融券',
 }
 
+# 需要跳过的属性正则模式（匹配到的属性直接剔除，不保存）
+ATTR_SKIP_PATTERNS = [
+    r'^\d{4}年(?:年报|中报|季报)\w*',  # 例如：2025年报扭亏、2024年报预增
+]
+
+def clean_attr_name(name):
+    """清洗属性名称，返回清洗后的名称；返回None表示跳过该属性"""
+    # 1. 跳过财报类临时属性
+    for pattern in ATTR_SKIP_PATTERNS:
+        if re.match(pattern, name):
+            return None
+    # 2. "江苏板块" → "江苏"（地区名+板块）
+    if name.endswith('板块') and name[:-2] in REGION_NAMES:
+        return name[:-2]
+    return name
+
 # 系数名称映射（用于显示）
 COEFFICIENT_NAMES = {
     'STOCK_WEIGHT_FIRST': '第一个股票的权重',
     'STOCK_WEIGHT_LAST': '最后一个股票的权重',
     'BOARD_WEIGHT': '每板权重',
     'RUSHING_WEIGHT': '竞价抢筹权重(废弃)',
-    'RUSH_ATTR_COEFFICIENT': '抢筹属性总系数 a',
     'RUSH_PCT_COEFFICIENT': '涨幅系数 b',
     'RUSH_LETTER_ATTR_WEIGHT': '抢筹字母属性系数',
     'RUSH_REGION_ATTR_WEIGHT': '抢筹地区属性系数',
@@ -161,7 +178,9 @@ COEFFICIENT_NAMES = {
     'REGION_ATTR_WEIGHT': '地区属性系数',
     'ATTR_COUNT_WEIGHT': '属性数量差距系数',
     'NEGATIVE_ATTR_COUNT_WEIGHT': '负反馈属性数量差距系数',
-    'NEGATIVE_OVERALL_WEIGHT': '负反馈整体系数',
+    'NEGATIVE_ATTR_WEIGHT': '负反馈其他属性系数',
+    'NEGATIVE_LETTER_ATTR_WEIGHT': '负反馈字母属性系数',
+    'NEGATIVE_REGION_ATTR_WEIGHT': '负反馈地区属性系数',
     'BOARD_PRESS_WEIGHT': '同板压制系数',
     'NODE_GUIDE_WEIGHT': '节点指引系数',
     'HOLDER_RATIO_WEIGHT': '股东持股比例权重系数',
@@ -175,7 +194,6 @@ BAYESIAN_TO_COEFFICIENT = {
     'stock_weight_last': 'STOCK_WEIGHT_LAST',
     'board_weight': 'BOARD_WEIGHT',
     'rushing_weight': 'RUSHING_WEIGHT',
-    'rush_attr_coefficient': 'RUSH_ATTR_COEFFICIENT',
     'rush_pct_coefficient': 'RUSH_PCT_COEFFICIENT',
     'rush_letter_attr_weight': 'RUSH_LETTER_ATTR_WEIGHT',
     'rush_region_attr_weight': 'RUSH_REGION_ATTR_WEIGHT',
@@ -185,7 +203,9 @@ BAYESIAN_TO_COEFFICIENT = {
     'region_attr_weight': 'REGION_ATTR_WEIGHT',
     'attr_count_weight': 'ATTR_COUNT_WEIGHT',
     'negative_attr_count_weight': 'NEGATIVE_ATTR_COUNT_WEIGHT',
-    'negative_overall_weight': 'NEGATIVE_OVERALL_WEIGHT',
+    'negative_attr_weight': 'NEGATIVE_ATTR_WEIGHT',
+    'negative_letter_attr_weight': 'NEGATIVE_LETTER_ATTR_WEIGHT',
+    'negative_region_attr_weight': 'NEGATIVE_REGION_ATTR_WEIGHT',
     'board_press_weight': 'BOARD_PRESS_WEIGHT',
     'node_guide_weight': 'NODE_GUIDE_WEIGHT',
     'holder_ratio_weight': 'HOLDER_RATIO_WEIGHT',

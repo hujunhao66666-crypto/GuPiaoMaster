@@ -48,7 +48,7 @@ class StockMasterApp(QMainWindow):
         self.STOCK_WEIGHT_LAST = Coefficients.STOCK_WEIGHT_LAST
         self.BOARD_WEIGHT = Coefficients.BOARD_WEIGHT
         self.GEM_FACTOR = Coefficients.GEM_FACTOR  # 创业板系数
-        self.RUSH_ATTR_COEFFICIENT = Coefficients.RUSH_ATTR_COEFFICIENT
+
         self.RUSH_PCT_COEFFICIENT = Coefficients.RUSH_PCT_COEFFICIENT
         self.RUSH_LETTER_ATTR_WEIGHT = Coefficients.RUSH_LETTER_ATTR_WEIGHT
         self.RUSH_REGION_ATTR_WEIGHT = Coefficients.RUSH_REGION_ATTR_WEIGHT
@@ -58,7 +58,9 @@ class StockMasterApp(QMainWindow):
         self.REGION_ATTR_WEIGHT = Coefficients.REGION_ATTR_WEIGHT
         self.ATTR_COUNT_WEIGHT = Coefficients.ATTR_COUNT_WEIGHT
         self.NEGATIVE_ATTR_COUNT_WEIGHT = Coefficients.NEGATIVE_ATTR_COUNT_WEIGHT
-        self.NEGATIVE_OVERALL_WEIGHT = Coefficients.NEGATIVE_OVERALL_WEIGHT
+        self.NEGATIVE_ATTR_WEIGHT = Coefficients.NEGATIVE_ATTR_WEIGHT
+        self.NEGATIVE_LETTER_ATTR_WEIGHT = Coefficients.NEGATIVE_LETTER_ATTR_WEIGHT
+        self.NEGATIVE_REGION_ATTR_WEIGHT = Coefficients.NEGATIVE_REGION_ATTR_WEIGHT
         self.BOARD_PRESS_WEIGHT = Coefficients.BOARD_PRESS_WEIGHT
         self.NODE_GUIDE_WEIGHT = Coefficients.NODE_GUIDE_WEIGHT
         self.HOLDER_RATIO_WEIGHT = Coefficients.HOLDER_RATIO_WEIGHT
@@ -326,13 +328,15 @@ class StockMasterApp(QMainWindow):
             stock_weight_first REAL NOT NULL,
             stock_weight_last REAL NOT NULL,
             board_weight REAL NOT NULL,
-            rushing_weight REAL NOT NULL,
+
             rush_pct_coefficient REAL NOT NULL DEFAULT 0.2,
             yz_overall_weight REAL NOT NULL DEFAULT 1.0,
             attr_count_weight REAL NOT NULL,
             negative_attr_count_weight REAL NOT NULL,
             board_press_weight REAL NOT NULL DEFAULT 0.5,
-            negative_overall_weight REAL NOT NULL DEFAULT 1.0,
+            negative_attr_weight REAL NOT NULL DEFAULT 1.0,
+            negative_letter_attr_weight REAL NOT NULL DEFAULT 1.0,
+            negative_region_attr_weight REAL NOT NULL DEFAULT 1.0,
             node_guide_weight REAL NOT NULL DEFAULT 1.0,
             detail_text TEXT,
             create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -348,9 +352,15 @@ class StockMasterApp(QMainWindow):
             if 'board_press_weight' not in columns:
                 cursor.execute('ALTER TABLE backtest_results ADD COLUMN board_press_weight REAL NOT NULL DEFAULT 0.5')
             
-            if 'negative_overall_weight' not in columns:
-                cursor.execute('ALTER TABLE backtest_results ADD COLUMN negative_overall_weight REAL NOT NULL DEFAULT 1.0')
-            
+            if 'negative_attr_weight' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN negative_attr_weight REAL NOT NULL DEFAULT 1.0')
+
+            if 'negative_letter_attr_weight' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN negative_letter_attr_weight REAL NOT NULL DEFAULT 1.0')
+
+            if 'negative_region_attr_weight' not in columns:
+                cursor.execute('ALTER TABLE backtest_results ADD COLUMN negative_region_attr_weight REAL NOT NULL DEFAULT 1.0')
+
             if 'yz_overall_weight' not in columns:
                 cursor.execute('ALTER TABLE backtest_results ADD COLUMN yz_overall_weight REAL NOT NULL DEFAULT 1.0')
             
@@ -399,7 +409,9 @@ class StockMasterApp(QMainWindow):
                 'region_attr_weight': '非线性相关',
                 'attr_count_weight': '非线性相关',
                 'negative_attr_count_weight': '非线性相关',
-                'negative_overall_weight': '弱相关',
+                'negative_attr_weight': '弱相关',
+                'negative_letter_attr_weight': '弱相关',
+                'negative_region_attr_weight': '弱相关',
                 'board_press_weight': '非线性相关',
                 'node_guide_weight': '非线性相关',
                 'holder_ratio_weight': '非线性相关',
@@ -2523,13 +2535,13 @@ class StockMasterApp(QMainWindow):
         
         # 历史结果表格
         self.bayesian_history_table = QTableWidget()
-        self.bayesian_history_table.setColumnCount(24)
+        self.bayesian_history_table.setColumnCount(26)
         self.bayesian_history_table.setHorizontalHeaderLabels([
             '日期', '训练集得分', '验证集得分', '训练集范围', '验证集范围',
             '首股票权重', '末股票权重', '每板权重',
             '抢筹属性a', '涨幅系数b', '抢筹字母', '抢筹地区', '抢筹市值',
             '一字板', '字母属性', '地区属性',
-            '属性数量', '负反馈数量', '负反馈整体',
+            '属性数量', '负反馈数量', '负反馈其他', '负反馈字母', '负反馈地区',
             '节点指引', '同板压制', '股东持股', '市值权重', '市值指数'
         ])
         self.bayesian_history_table.setMaximumHeight(200)
@@ -2614,12 +2626,14 @@ class StockMasterApp(QMainWindow):
                 self.bayesian_history_table.setItem(row, 15, QTableWidgetItem(f'{params.get("region_attr_weight", 0.0):.4f}'))
                 self.bayesian_history_table.setItem(row, 16, QTableWidgetItem(f'{params.get("attr_count_weight", 0.0):.4f}'))
                 self.bayesian_history_table.setItem(row, 17, QTableWidgetItem(f'{params.get("negative_attr_count_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 18, QTableWidgetItem(f'{params.get("negative_overall_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 19, QTableWidgetItem(f'{params.get("node_guide_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 20, QTableWidgetItem(f'{params.get("board_press_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 21, QTableWidgetItem(f'{params.get("holder_ratio_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 22, QTableWidgetItem(f'{params.get("market_cap_weight", 0.0):.4f}'))
-                self.bayesian_history_table.setItem(row, 23, QTableWidgetItem(f'{params.get("market_cap_exponent", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 18, QTableWidgetItem(f'{params.get("negative_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 19, QTableWidgetItem(f'{params.get("negative_letter_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 20, QTableWidgetItem(f'{params.get("negative_region_attr_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 21, QTableWidgetItem(f'{params.get("node_guide_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 22, QTableWidgetItem(f'{params.get("board_press_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 23, QTableWidgetItem(f'{params.get("holder_ratio_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 24, QTableWidgetItem(f'{params.get("market_cap_weight", 0.0):.4f}'))
+                self.bayesian_history_table.setItem(row, 25, QTableWidgetItem(f'{params.get("market_cap_exponent", 0.0):.4f}'))
             
             self.bayesian_history_table.resizeColumnsToContents()
         finally:
@@ -2660,7 +2674,7 @@ class StockMasterApp(QMainWindow):
             self.STOCK_WEIGHT_FIRST = params.get('stock_weight_first', self.STOCK_WEIGHT_FIRST)
             self.STOCK_WEIGHT_LAST = params.get('stock_weight_last', self.STOCK_WEIGHT_LAST)
             self.BOARD_WEIGHT = params.get('board_weight', self.BOARD_WEIGHT)
-            self.RUSH_ATTR_COEFFICIENT = params.get('rush_attr_coefficient', self.RUSH_ATTR_COEFFICIENT)
+
             self.RUSH_PCT_COEFFICIENT = params.get('rush_pct_coefficient', self.RUSH_PCT_COEFFICIENT)
             self.RUSH_LETTER_ATTR_WEIGHT = params.get('rush_letter_attr_weight', self.RUSH_LETTER_ATTR_WEIGHT)
             self.RUSH_REGION_ATTR_WEIGHT = params.get('rush_region_attr_weight', self.RUSH_REGION_ATTR_WEIGHT)
@@ -2670,7 +2684,9 @@ class StockMasterApp(QMainWindow):
             self.REGION_ATTR_WEIGHT = params.get('region_attr_weight', self.REGION_ATTR_WEIGHT)
             self.ATTR_COUNT_WEIGHT = params.get('attr_count_weight', self.ATTR_COUNT_WEIGHT)
             self.NEGATIVE_ATTR_COUNT_WEIGHT = params.get('negative_attr_count_weight', self.NEGATIVE_ATTR_COUNT_WEIGHT)
-            self.NEGATIVE_OVERALL_WEIGHT = params.get('negative_overall_weight', self.NEGATIVE_OVERALL_WEIGHT)
+            self.NEGATIVE_ATTR_WEIGHT = params.get('negative_attr_weight', self.NEGATIVE_ATTR_WEIGHT)
+            self.NEGATIVE_LETTER_ATTR_WEIGHT = params.get('negative_letter_attr_weight', self.NEGATIVE_LETTER_ATTR_WEIGHT)
+            self.NEGATIVE_REGION_ATTR_WEIGHT = params.get('negative_region_attr_weight', self.NEGATIVE_REGION_ATTR_WEIGHT)
             self.BOARD_PRESS_WEIGHT = params.get('board_press_weight', self.BOARD_PRESS_WEIGHT)
             self.NODE_GUIDE_WEIGHT = params.get('node_guide_weight', self.NODE_GUIDE_WEIGHT)
             self.HOLDER_RATIO_WEIGHT = params.get('holder_ratio_weight', self.HOLDER_RATIO_WEIGHT)
@@ -2684,7 +2700,7 @@ class StockMasterApp(QMainWindow):
             Coefficients.STOCK_WEIGHT_FIRST = self.STOCK_WEIGHT_FIRST
             Coefficients.STOCK_WEIGHT_LAST = self.STOCK_WEIGHT_LAST
             Coefficients.BOARD_WEIGHT = self.BOARD_WEIGHT
-            Coefficients.RUSH_ATTR_COEFFICIENT = self.RUSH_ATTR_COEFFICIENT
+
             Coefficients.RUSH_PCT_COEFFICIENT = self.RUSH_PCT_COEFFICIENT
             Coefficients.RUSH_LETTER_ATTR_WEIGHT = self.RUSH_LETTER_ATTR_WEIGHT
             Coefficients.RUSH_REGION_ATTR_WEIGHT = self.RUSH_REGION_ATTR_WEIGHT
@@ -2694,7 +2710,9 @@ class StockMasterApp(QMainWindow):
             Coefficients.REGION_ATTR_WEIGHT = self.REGION_ATTR_WEIGHT
             Coefficients.ATTR_COUNT_WEIGHT = self.ATTR_COUNT_WEIGHT
             Coefficients.NEGATIVE_ATTR_COUNT_WEIGHT = self.NEGATIVE_ATTR_COUNT_WEIGHT
-            Coefficients.NEGATIVE_OVERALL_WEIGHT = self.NEGATIVE_OVERALL_WEIGHT
+            Coefficients.NEGATIVE_ATTR_WEIGHT = self.NEGATIVE_ATTR_WEIGHT
+            Coefficients.NEGATIVE_LETTER_ATTR_WEIGHT = self.NEGATIVE_LETTER_ATTR_WEIGHT
+            Coefficients.NEGATIVE_REGION_ATTR_WEIGHT = self.NEGATIVE_REGION_ATTR_WEIGHT
             Coefficients.BOARD_PRESS_WEIGHT = self.BOARD_PRESS_WEIGHT
             Coefficients.NODE_GUIDE_WEIGHT = self.NODE_GUIDE_WEIGHT
             Coefficients.HOLDER_RATIO_WEIGHT = self.HOLDER_RATIO_WEIGHT
@@ -5020,7 +5038,7 @@ class StockMasterApp(QMainWindow):
 - 股东持股权重 (HOLDER_RATIO_WEIGHT) = {holder_ratio_weight:.2f}
 - 市值权重 (MARKET_CAP_WEIGHT) = {market_cap_weight:.4f}
 - 市值指数 (MARKET_CAP_EXPONENT) = {market_cap_exponent:.4f}
-- 抢筹-其他属性总系数 (RUSH_ATTR_COEFFICIENT) = {rush_attr_coeff:.4f}
+
 	- 抢筹-字母属性系数 (RUSH_LETTER_ATTR_WEIGHT) = {rush_letter_attr_coeff:.4f}
 	- 抢筹-地区属性系数 (RUSH_REGION_ATTR_WEIGHT) = {rush_region_attr_coeff:.4f}
 	- 抢筹市值系数 (RUSH_MARKET_CAP_COEFFICIENT) = {rush_market_cap_coeff:.4f}
@@ -5030,7 +5048,9 @@ class StockMasterApp(QMainWindow):
 - 地区属性权重 (REGION_ATTR_WEIGHT) = {region_attr_weight:.2f}
 - 属性数量权重 (ATTR_COUNT_WEIGHT) = {attr_count_weight:.2f}
 - 负反馈数量权重 (NEGATIVE_ATTR_COUNT_WEIGHT) = {negative_attr_count_weight:.2f}
-- 负反馈整体权重 (NEGATIVE_OVERALL_WEIGHT) = {negative_overall_weight:.2f}
+- 负反馈其他属性权重 (NEGATIVE_ATTR_WEIGHT) = {negative_attr_weight:.2f}
+- 负反馈字母属性权重 (NEGATIVE_LETTER_ATTR_WEIGHT) = {negative_letter_attr_weight:.2f}
+- 负反馈地区属性权重 (NEGATIVE_REGION_ATTR_WEIGHT) = {negative_region_attr_weight:.2f}
 
 <b>归一化常量：</b>
 - NORM_YZ_SCORE = {norm_yz:.1f}
@@ -5049,7 +5069,7 @@ class StockMasterApp(QMainWindow):
     holder_ratio_weight=self.HOLDER_RATIO_WEIGHT,
     market_cap_weight=self.MARKET_CAP_WEIGHT,
     market_cap_exponent=self.MARKET_CAP_EXPONENT,
-    rush_attr_coeff=self.RUSH_ATTR_COEFFICIENT,
+
     rush_pct_coeff=self.RUSH_PCT_COEFFICIENT,
     rush_letter_attr_coeff=self.RUSH_LETTER_ATTR_WEIGHT,
     rush_region_attr_coeff=self.RUSH_REGION_ATTR_WEIGHT,
@@ -5059,7 +5079,9 @@ class StockMasterApp(QMainWindow):
     region_attr_weight=self.REGION_ATTR_WEIGHT,
     attr_count_weight=self.ATTR_COUNT_WEIGHT,
     negative_attr_count_weight=self.NEGATIVE_ATTR_COUNT_WEIGHT,
-    negative_overall_weight=self.NEGATIVE_OVERALL_WEIGHT,
+    negative_attr_weight=self.NEGATIVE_ATTR_WEIGHT,
+	negative_letter_attr_weight=self.NEGATIVE_LETTER_ATTR_WEIGHT,
+	negative_region_attr_weight=self.NEGATIVE_REGION_ATTR_WEIGHT,
     norm_yz=NORM_YZ_SCORE,
     norm_qc=NORM_QC_SCORE,
     norm_ff=NORM_FF_SCORE,
@@ -5292,10 +5314,8 @@ class StockMasterApp(QMainWindow):
             rating_text = '好评' if rating_score == 1.0 else '差评'
             rows.append(('  股票评价', f'{rating_text} ({rating_score}x)'))
             
-            # 负反馈整体调整
+            # 负反馈分类系数调整（预留）
             negative_overall_factor = details.get('negative_overall_factor', 1.0)
-            if negative_overall_factor != 1.0:
-                rows.append(('  负反馈整体系数', f'{negative_overall_factor}x'))
             
             # 最终得分计算
             rows.append(('', ''))
@@ -5381,7 +5401,7 @@ class StockMasterApp(QMainWindow):
                 for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                                     ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                                     ('board_weight', 'BOARD_WEIGHT'),
-                                    ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+
                             ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
                                 ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
                                 ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
@@ -5391,7 +5411,9 @@ class StockMasterApp(QMainWindow):
                                     ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
                                     ('attr_count_weight', 'ATTR_COUNT_WEIGHT'),
                                     ('negative_attr_count_weight', 'NEGATIVE_ATTR_COUNT_WEIGHT'),
-                                    ('negative_overall_weight', 'NEGATIVE_OVERALL_WEIGHT'),
+                                    ('negative_attr_weight', 'NEGATIVE_ATTR_WEIGHT'),
+							('negative_letter_attr_weight', 'NEGATIVE_LETTER_ATTR_WEIGHT'),
+							('negative_region_attr_weight', 'NEGATIVE_REGION_ATTR_WEIGHT'),
                                     ('board_press_weight', 'BOARD_PRESS_WEIGHT'),
                                     ('node_guide_weight', 'NODE_GUIDE_WEIGHT'),
                                     ('holder_ratio_weight', 'HOLDER_RATIO_WEIGHT'),
@@ -5480,17 +5502,18 @@ class StockMasterApp(QMainWindow):
                                 attr_weighted_count_yz[attr] = 0
                             attr_weighted_count_yz[attr] += weight * weight_factor
                     
-                    # 负反馈属性 - 始终使用-1作为权重因子，确保是减分项（过滤掉单字母属性）
+                    # 负反馈属性 - 按分类使用各自的系数（字母、地区、其他）
                     for attr in stock_attrs_ff[stock_id]:
-                        # 过滤单个字母属性
-                        if len(attr) <= 1:
-                            continue
                         if attr not in attr_weighted_count_ff:
                             attr_weighted_count_ff[attr] = 0
                         if attr not in attr_weighted_count:
                             attr_weighted_count[attr] = 0
-                        # 负反馈属性始终是减分项，使用-1作为权重因子，并乘以整体系数
-                        ff_score = weight * (-1) * self.NEGATIVE_OVERALL_WEIGHT
+                        if len(attr) == 1 and attr.isalpha():
+                            ff_score = weight * (-1) * self.NEGATIVE_LETTER_ATTR_WEIGHT
+                        elif attr in REGION_NAMES:
+                            ff_score = weight * (-1) * self.NEGATIVE_REGION_ATTR_WEIGHT
+                        else:
+                            ff_score = weight * (-1) * self.NEGATIVE_ATTR_WEIGHT
                         attr_weighted_count[attr] += ff_score
                         attr_weighted_count_ff[attr] += ff_score
 
@@ -5593,10 +5616,8 @@ class StockMasterApp(QMainWindow):
                         attr_weighted_count_qc_letter[attr] *= self.RUSH_LETTER_ATTR_WEIGHT
                     if attr in attr_weighted_count_qc_region:
                         attr_weighted_count_qc_region[attr] *= self.RUSH_REGION_ATTR_WEIGHT
-                    if attr in attr_weighted_count_qc:
-                        attr_weighted_count_qc[attr] *= self.RUSH_ATTR_COEFFICIENT
-                    
-                    # 应用到负反馈属性得分字典 - 只应用negative_count_factor，保持负号
+
+                    # 应用到负反馈属性得分字典 - 应用negative_count_factor，保持负号
                     if attr in attr_weighted_count_ff:
                         # 计算绝对值，应用negative_count_factor，再保持负号
                         abs_score = abs(attr_weighted_count_ff[attr])
@@ -5938,7 +5959,7 @@ class StockMasterApp(QMainWindow):
                                 negative_attrs.append(attr)
 
                     # 负反馈整体系数已在属性计算时应用
-                    negative_overall_factor = 1.0 if not negative_attrs else self.NEGATIVE_OVERALL_WEIGHT
+                    negative_overall_factor = 1.0
 
                     # 获取股东持股比例得分
                     holder_ratio_score = 0
@@ -7528,7 +7549,7 @@ class StockMasterApp(QMainWindow):
         self.STOCK_WEIGHT_FIRST = self.first_stock_weight_input.value()
         self.STOCK_WEIGHT_LAST = self.last_stock_weight_input.value()
         self.BOARD_WEIGHT = self.board_weight_input.value()
-        self.RUSH_ATTR_COEFFICIENT = self.rush_attr_coefficient_input.value()
+
         self.RUSH_PCT_COEFFICIENT = self.rush_pct_coefficient_input.value()
         self.RUSH_LETTER_ATTR_WEIGHT = self.rush_letter_attr_weight_input.value()
         self.RUSH_REGION_ATTR_WEIGHT = self.rush_region_attr_weight_input.value()
@@ -7536,7 +7557,9 @@ class StockMasterApp(QMainWindow):
         self.YZ_OVERALL_WEIGHT = self.yz_overall_weight_input.value()
         self.ATTR_COUNT_WEIGHT = self.attr_count_weight_input.value()
         self.NEGATIVE_ATTR_COUNT_WEIGHT = self.negative_attr_count_weight_input.value()
-        self.NEGATIVE_OVERALL_WEIGHT = self.negative_overall_weight_input.value()
+        self.NEGATIVE_ATTR_WEIGHT = self.negative_attr_weight_input.value()
+        self.NEGATIVE_LETTER_ATTR_WEIGHT = self.negative_letter_attr_weight_input.value()
+        self.NEGATIVE_REGION_ATTR_WEIGHT = self.negative_region_attr_weight_input.value()
         self.BOARD_PRESS_WEIGHT = self.board_press_weight_input.value()
         self.NODE_GUIDE_WEIGHT = self.node_guide_weight_input.value()
         self.HOLDER_RATIO_WEIGHT = self.holder_ratio_weight_input.value()
@@ -7572,7 +7595,8 @@ class StockMasterApp(QMainWindow):
                 'rush_market_cap_coefficient',
                 'yz_overall_weight', 'letter_attr_weight',
                 'region_attr_weight', 'attr_count_weight',
-                'negative_attr_count_weight', 'negative_overall_weight',
+                'negative_attr_count_weight',
+                'negative_attr_weight', 'negative_letter_attr_weight', 'negative_region_attr_weight',
                 'board_press_weight', 'node_guide_weight', 'holder_ratio_weight',
                 'market_cap_weight', 'market_cap_exponent',
             ]
@@ -7590,7 +7614,9 @@ class StockMasterApp(QMainWindow):
                 'region_attr_weight': '地区属性',
                 'attr_count_weight': '属性数量差距',
                 'negative_attr_count_weight': '负反馈数量差距',
-                'negative_overall_weight': '负反馈整体',
+                'negative_attr_weight': '负反馈其他',
+                'negative_letter_attr_weight': '负反馈字母',
+                'negative_region_attr_weight': '负反馈地区',
                 'board_press_weight': '同板压制',
                 'node_guide_weight': '节点指引',
                 'holder_ratio_weight': '股东持股',
@@ -7878,7 +7904,7 @@ class StockMasterApp(QMainWindow):
         ('stock_weight_first', '首股票权重', '权重系数', Coefficients.STOCK_WEIGHT_FIRST),
         ('stock_weight_last', '末股票权重', '权重系数', Coefficients.STOCK_WEIGHT_LAST),
         ('board_weight', '每板权重', '板数因子', Coefficients.BOARD_WEIGHT),
-        ('rush_attr_coefficient', '抢筹属性总系数 a', '抢筹系数', Coefficients.RUSH_ATTR_COEFFICIENT),
+
         ('rush_pct_coefficient', '涨幅系数 b', '抢筹系数', Coefficients.RUSH_PCT_COEFFICIENT),
         ('rush_letter_attr_weight', '抢筹字母属性系数', '抢筹系数', Coefficients.RUSH_LETTER_ATTR_WEIGHT),
         ('rush_region_attr_weight', '抢筹地区属性系数', '抢筹系数', Coefficients.RUSH_REGION_ATTR_WEIGHT),
@@ -7888,7 +7914,9 @@ class StockMasterApp(QMainWindow):
         ('region_attr_weight', '地区属性', '属性因子', Coefficients.REGION_ATTR_WEIGHT),
         ('attr_count_weight', '属性数量差距', '属性因子', Coefficients.ATTR_COUNT_WEIGHT),
         ('negative_attr_count_weight', '负反馈数量差距', '负反馈因子', Coefficients.NEGATIVE_ATTR_COUNT_WEIGHT),
-        ('negative_overall_weight', '负反馈整体', '负反馈因子', Coefficients.NEGATIVE_OVERALL_WEIGHT),
+        ('negative_attr_weight', '负反馈其他属性', '负反馈因子', Coefficients.NEGATIVE_ATTR_WEIGHT),
+('negative_letter_attr_weight', '负反馈字母属性', '负反馈因子', Coefficients.NEGATIVE_LETTER_ATTR_WEIGHT),
+('negative_region_attr_weight', '负反馈地区属性', '负反馈因子', Coefficients.NEGATIVE_REGION_ATTR_WEIGHT),
         ('board_press_weight', '同板压制', '压制因子', Coefficients.BOARD_PRESS_WEIGHT),
         ('node_guide_weight', '节点指引', '指引因子', Coefficients.NODE_GUIDE_WEIGHT),
         ('holder_ratio_weight', '股东持股', '股东因子', Coefficients.HOLDER_RATIO_WEIGHT),
@@ -8554,8 +8582,8 @@ class StockMasterApp(QMainWindow):
                     INSERT INTO backtest_results 
                     (test_date, start_date, end_date, total_score, valid_days, total_valid_stocks, 
                      top_n, valid_score, stock_weight_first, stock_weight_last, board_weight,
-                     rushing_weight, rush_pct_coefficient, rush_letter_attr_weight, rush_region_attr_weight, rush_market_cap_coefficient, yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_overall_weight, node_guide_weight, holder_ratio_weight, detail_text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rush_pct_coefficient, rush_letter_attr_weight, rush_region_attr_weight, rush_market_cap_coefficient, yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_attr_weight, negative_letter_attr_weight, negative_region_attr_weight, node_guide_weight, holder_ratio_weight, detail_text)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     QDate.currentDate().toString('yyyy-MM-dd'),
                     start_date.toString('yyyy-MM-dd'),
@@ -8568,7 +8596,7 @@ class StockMasterApp(QMainWindow):
                     self.STOCK_WEIGHT_FIRST,
                     self.STOCK_WEIGHT_LAST,
                     self.BOARD_WEIGHT,
-                    self.RUSH_ATTR_COEFFICIENT,
+
                     self.RUSH_PCT_COEFFICIENT,
                     self.RUSH_LETTER_ATTR_WEIGHT,
                     self.RUSH_REGION_ATTR_WEIGHT,
@@ -8577,7 +8605,9 @@ class StockMasterApp(QMainWindow):
                     self.ATTR_COUNT_WEIGHT,
                     self.NEGATIVE_ATTR_COUNT_WEIGHT,
                     self.BOARD_PRESS_WEIGHT,
-                    self.NEGATIVE_OVERALL_WEIGHT,
+                    self.NEGATIVE_ATTR_WEIGHT,
+                    self.NEGATIVE_LETTER_ATTR_WEIGHT,
+                    self.NEGATIVE_REGION_ATTR_WEIGHT,
                     self.NODE_GUIDE_WEIGHT,
                     self.HOLDER_RATIO_WEIGHT,
                     '\n'.join(detail_lines)
@@ -8607,7 +8637,7 @@ class StockMasterApp(QMainWindow):
                 SELECT id, test_date, start_date, end_date, total_score, valid_days,
                        total_valid_stocks, top_n, valid_score,
                        stock_weight_first, stock_weight_last, board_weight,
-                       rushing_weight, yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_overall_weight, node_guide_weight, holder_ratio_weight
+                       yz_overall_weight, attr_count_weight, negative_attr_count_weight, board_press_weight, negative_attr_weight, negative_letter_attr_weight, negative_region_attr_weight, node_guide_weight, holder_ratio_weight
                 FROM backtest_results
                 ORDER BY create_time DESC
                 LIMIT 50
@@ -8628,12 +8658,12 @@ class StockMasterApp(QMainWindow):
             
             # 创建表格
             table = QTableWidget()
-            table.setColumnCount(20)
+            table.setColumnCount(21)
             table.setHorizontalHeaderLabels([
                 'ID', '测试日期', '开始日期', '结束日期', '总得分', '有效天数',
                 '命中股票数', '前N名', '有效得分',
                 '首股权重', '末股权重', '板数权重',
-                '抢筹权重', '一字板系数', '属性系数', '负反馈系数', '同板压制系数', '负反馈整体系数', '节点指引系数', '持股比例权重'
+	                '一字板系数', '属性系数', '负反馈数量系数', '同板压制系数', '负反馈其他属性', '负反馈字母属性', '负反馈地区属性', '节点指引系数', '持股比例权重'
             ])
             table.setRowCount(len(results))
             
@@ -8768,7 +8798,7 @@ class StockMasterApp(QMainWindow):
             for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                                 ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                                 ('board_weight', 'BOARD_WEIGHT'),
-                                ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+
                             ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
                                 ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
                                 ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
@@ -8778,7 +8808,9 @@ class StockMasterApp(QMainWindow):
                                 ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
                                 ('attr_count_weight', 'ATTR_COUNT_WEIGHT'),
                                 ('negative_attr_count_weight', 'NEGATIVE_ATTR_COUNT_WEIGHT'),
-                                ('negative_overall_weight', 'NEGATIVE_OVERALL_WEIGHT'),
+                                ('negative_attr_weight', 'NEGATIVE_ATTR_WEIGHT'),
+							('negative_letter_attr_weight', 'NEGATIVE_LETTER_ATTR_WEIGHT'),
+							('negative_region_attr_weight', 'NEGATIVE_REGION_ATTR_WEIGHT'),
                                 ('board_press_weight', 'BOARD_PRESS_WEIGHT'),
                                 ('node_guide_weight', 'NODE_GUIDE_WEIGHT'),
                                 ('holder_ratio_weight', 'HOLDER_RATIO_WEIGHT'),
@@ -8875,15 +8907,18 @@ class StockMasterApp(QMainWindow):
                             attr_weighted_count_yz[attr] = 0
                         attr_weighted_count_yz[attr] += weight * weight_factor
                 
-                # 负反馈属性 - 过滤掉单个字母属性（如Z、F等）
+                # 负反馈属性 - 按分类使用各自的系数（字母、地区、其他）
                 for attr in stock_attrs_ff[stock_id]:
-                    if len(attr) <= 1:
-                        continue
                     if attr not in attr_weighted_count_ff:
                         attr_weighted_count_ff[attr] = 0
                     if attr not in attr_weighted_count:
                         attr_weighted_count[attr] = 0
-                    ff_score = weight * (-1) * self.NEGATIVE_OVERALL_WEIGHT
+                    if len(attr) == 1 and attr.isalpha():
+                        ff_score = weight * (-1) * self.NEGATIVE_LETTER_ATTR_WEIGHT
+                    elif attr in REGION_NAMES:
+                        ff_score = weight * (-1) * self.NEGATIVE_REGION_ATTR_WEIGHT
+                    else:
+                        ff_score = weight * (-1) * self.NEGATIVE_ATTR_WEIGHT
                     attr_weighted_count[attr] += ff_score
                     attr_weighted_count_ff[attr] += ff_score
 
@@ -8965,10 +9000,8 @@ class StockMasterApp(QMainWindow):
                     attr_weighted_count_qc_letter[attr] *= self.RUSH_LETTER_ATTR_WEIGHT
                 if attr in attr_weighted_count_qc_region:
                     attr_weighted_count_qc_region[attr] *= self.RUSH_REGION_ATTR_WEIGHT
-                if attr in attr_weighted_count_qc:
-                    attr_weighted_count_qc[attr] *= self.RUSH_ATTR_COEFFICIENT
-                
-                # 应用到负反馈属性得分字典 - 只应用negative_count_factor，保持负号
+
+                # 应用到负反馈属性得分字典 - 应用negative_count_factor，保持负号
                 if attr in attr_weighted_count_ff:
                     abs_score = abs(attr_weighted_count_ff[attr])
                     attr_weighted_count_ff[attr] = -abs_score * negative_count_factor
@@ -11268,16 +11301,19 @@ class StockMasterApp(QMainWindow):
             self.STOCK_WEIGHT_FIRST,
             self.STOCK_WEIGHT_LAST,
             self.BOARD_WEIGHT,
-            self.RUSH_ATTR_COEFFICIENT,
+
             self.RUSH_PCT_COEFFICIENT,
             self.RUSH_LETTER_ATTR_WEIGHT,
             self.RUSH_REGION_ATTR_WEIGHT,
             self.RUSH_MARKET_CAP_COEFFICIENT,
             self.YZ_OVERALL_WEIGHT,
+            self.LETTER_ATTR_WEIGHT,
             self.REGION_ATTR_WEIGHT,
             self.ATTR_COUNT_WEIGHT,
             self.NEGATIVE_ATTR_COUNT_WEIGHT,
-            self.NEGATIVE_OVERALL_WEIGHT,
+            self.NEGATIVE_ATTR_WEIGHT,
+            self.NEGATIVE_LETTER_ATTR_WEIGHT,
+            self.NEGATIVE_REGION_ATTR_WEIGHT,
             self.BOARD_PRESS_WEIGHT,
             self.NODE_GUIDE_WEIGHT,
             self.HOLDER_RATIO_WEIGHT,
@@ -11298,7 +11334,7 @@ class StockMasterApp(QMainWindow):
         for _key, _attr in [('stock_weight_first', 'STOCK_WEIGHT_FIRST'),
                             ('stock_weight_last', 'STOCK_WEIGHT_LAST'),
                             ('board_weight', 'BOARD_WEIGHT'),
-                            ('rush_attr_coefficient', 'RUSH_ATTR_COEFFICIENT'),
+
                             ('rush_pct_coefficient', 'RUSH_PCT_COEFFICIENT'),
                             ('rush_letter_attr_weight', 'RUSH_LETTER_ATTR_WEIGHT'),
                             ('rush_region_attr_weight', 'RUSH_REGION_ATTR_WEIGHT'),
@@ -11308,7 +11344,9 @@ class StockMasterApp(QMainWindow):
                             ('region_attr_weight', 'REGION_ATTR_WEIGHT'),
                             ('attr_count_weight', 'ATTR_COUNT_WEIGHT'),
                             ('negative_attr_count_weight', 'NEGATIVE_ATTR_COUNT_WEIGHT'),
-                            ('negative_overall_weight', 'NEGATIVE_OVERALL_WEIGHT'),
+                            ('negative_attr_weight', 'NEGATIVE_ATTR_WEIGHT'),
+							('negative_letter_attr_weight', 'NEGATIVE_LETTER_ATTR_WEIGHT'),
+							('negative_region_attr_weight', 'NEGATIVE_REGION_ATTR_WEIGHT'),
                             ('board_press_weight', 'BOARD_PRESS_WEIGHT'),
                             ('node_guide_weight', 'NODE_GUIDE_WEIGHT'),
                             ('holder_ratio_weight', 'HOLDER_RATIO_WEIGHT'),

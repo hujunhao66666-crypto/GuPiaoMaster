@@ -52,20 +52,42 @@ class BayesianOptimizationThread(QThread):
                 self.log("[贝叶斯] 使用自适应参数范围（线性窄域/非线性全域）")
             else:
                 pbounds = BAYESIAN_BOUNDS.copy()
-            pbounds['stock_weight_first'] = (1.0, 3.0)
-            pbounds['stock_weight_last'] = (0.1, 1.0)
+            # 通用范围扩大：所有参数范围乘以3倍（以上一轮最优值为中心向外扩）
+            EXPANSION_FACTOR = 3.0
+            for k in list(pbounds.keys()):
+                lo, hi = pbounds[k]
+                center = (lo + hi) / 2
+                half_range = (hi - lo) / 2 * EXPANSION_FACTOR
+                min_range = max(abs(center) * 0.05, 0.001)
+                if half_range < min_range / 2:
+                    half_range = min_range / 2
+                pbounds[k] = (center - half_range, center + half_range)
+            self.log(f"[贝叶斯] 参数范围已扩大 {EXPANSION_FACTOR} 倍（防局部最优）")
+
+            # 过滤掉因子治理中禁用的参数
+            gov = getattr(self.main, '_factor_enabled', {})
+            disabled_params = {k for k, v in gov.items() if not v}
+            if disabled_params:
+                for k in list(pbounds.keys()):
+                    if k in disabled_params:
+                        del pbounds[k]
+                self.log(f"[贝叶斯] 因子治理禁用了 {len(disabled_params)} 个参数: {sorted(disabled_params)}")
+                self.log(f"[贝叶斯] 优化参数数: {len(pbounds)} 个")
+            else:
+                self.log(f"[贝叶斯] 全部 {len(pbounds)} 个参数参与优化")
 
             self.original_coeffs = {
                 'STOCK_WEIGHT_FIRST': self.main.STOCK_WEIGHT_FIRST,
                 'STOCK_WEIGHT_LAST': self.main.STOCK_WEIGHT_LAST,
                 'BOARD_WEIGHT': self.main.BOARD_WEIGHT,
-                'RUSH_ATTR_COEFFICIENT': self.main.RUSH_ATTR_COEFFICIENT,
                 'YZ_OVERALL_WEIGHT': self.main.YZ_OVERALL_WEIGHT,
                 'LETTER_ATTR_WEIGHT': self.main.LETTER_ATTR_WEIGHT,
                 'REGION_ATTR_WEIGHT': self.main.REGION_ATTR_WEIGHT,
                 'ATTR_COUNT_WEIGHT': self.main.ATTR_COUNT_WEIGHT,
                 'NEGATIVE_ATTR_COUNT_WEIGHT': self.main.NEGATIVE_ATTR_COUNT_WEIGHT,
-                'NEGATIVE_OVERALL_WEIGHT': self.main.NEGATIVE_OVERALL_WEIGHT,
+                'NEGATIVE_ATTR_WEIGHT': self.main.NEGATIVE_ATTR_WEIGHT,
+                'NEGATIVE_LETTER_ATTR_WEIGHT': self.main.NEGATIVE_LETTER_ATTR_WEIGHT,
+                'NEGATIVE_REGION_ATTR_WEIGHT': self.main.NEGATIVE_REGION_ATTR_WEIGHT,
                 'BOARD_PRESS_WEIGHT': self.main.BOARD_PRESS_WEIGHT,
                 'NODE_GUIDE_WEIGHT': self.main.NODE_GUIDE_WEIGHT,
                 'HOLDER_RATIO_WEIGHT': self.main.HOLDER_RATIO_WEIGHT,
@@ -74,53 +96,10 @@ class BayesianOptimizationThread(QThread):
             }
 
             def set_params(params):
-                self.main.STOCK_WEIGHT_FIRST = params['stock_weight_first']
-                self.main.STOCK_WEIGHT_LAST = params['stock_weight_last']
-                self.main.BOARD_WEIGHT = params['board_weight']
-                self.main.RUSH_ATTR_COEFFICIENT = params['rush_attr_coefficient']
-                self.main.YZ_OVERALL_WEIGHT = params['yz_overall_weight']
-                self.main.LETTER_ATTR_WEIGHT = params['letter_attr_weight']
-                self.main.REGION_ATTR_WEIGHT = params['region_attr_weight']
-                self.main.ATTR_COUNT_WEIGHT = params['attr_count_weight']
-                self.main.NEGATIVE_ATTR_COUNT_WEIGHT = params['negative_attr_count_weight']
-                self.main.NEGATIVE_OVERALL_WEIGHT = params['negative_overall_weight']
-                self.main.BOARD_PRESS_WEIGHT = params['board_press_weight']
-                self.main.NODE_GUIDE_WEIGHT = params['node_guide_weight']
-                self.main.HOLDER_RATIO_WEIGHT = params['holder_ratio_weight']
-                self.main.MARKET_CAP_WEIGHT = params['market_cap_weight']
-                self.main.MARKET_CAP_EXPONENT = params['market_cap_exponent']
-                # 应用因子治理：禁用的因子强制为0（加法权重）或1（乘法因子）
-                gov = getattr(self.main, '_factor_enabled', {})
-                if not gov.get('stock_weight_first', True):
-                    self.main.STOCK_WEIGHT_FIRST = 0.0
-                if not gov.get('stock_weight_last', True):
-                    self.main.STOCK_WEIGHT_LAST = 0.0
-                if not gov.get('board_weight', True):
-                    self.main.BOARD_WEIGHT = 0.0
-                if not gov.get('rush_attr_coefficient', True):
-                    self.main.RUSH_ATTR_COEFFICIENT = 0.0
-                if not gov.get('yz_overall_weight', True):
-                    self.main.YZ_OVERALL_WEIGHT = 0.0
-                if not gov.get('letter_attr_weight', True):
-                    self.main.LETTER_ATTR_WEIGHT = 0.0
-                if not gov.get('region_attr_weight', True):
-                    self.main.REGION_ATTR_WEIGHT = 0.0
-                if not gov.get('attr_count_weight', True):
-                    self.main.ATTR_COUNT_WEIGHT = 0.0
-                if not gov.get('negative_attr_count_weight', True):
-                    self.main.NEGATIVE_ATTR_COUNT_WEIGHT = 0.0
-                if not gov.get('negative_overall_weight', True):
-                    self.main.NEGATIVE_OVERALL_WEIGHT = 0.0
-                if not gov.get('board_press_weight', True):
-                    self.main.BOARD_PRESS_WEIGHT = 1.0
-                if not gov.get('node_guide_weight', True):
-                    self.main.NODE_GUIDE_WEIGHT = 1.0
-                if not gov.get('holder_ratio_weight', True):
-                    self.main.HOLDER_RATIO_WEIGHT = 0.0
-                if not gov.get('market_cap_weight', True):
-                    self.main.MARKET_CAP_WEIGHT = 0.0
-                if not gov.get('market_cap_exponent', True):
-                    self.main.MARKET_CAP_EXPONENT = 0.0
+                for key, val in params.items():
+                    attr_name = BAYESIAN_TO_COEFFICIENT.get(key)
+                    if attr_name:
+                        setattr(self.main, attr_name, val)
 
             def evaluate_train(**params):
                 set_params(params)
@@ -168,6 +147,8 @@ class BayesianOptimizationThread(QThread):
                     final_shrink_factor = factor
                     shrank_bounds = {}
                     for param_name, (orig_low, orig_high) in original_bounds.items():
+                        if orig_low > orig_high:
+                            orig_low, orig_high = orig_high, orig_low
                         best_val = best_params[param_name]
                         orig_range = orig_high - orig_low
                         half_range = orig_range * factor / 2
@@ -337,19 +318,10 @@ class BayesianOptimizationThread(QThread):
 
             self.progress_signal.emit({'stage': '更新配置', 'pct': 97, 'log': '正在更新配置文件...'})
 
-            self.main.STOCK_WEIGHT_FIRST = best_params['stock_weight_first']
-            self.main.STOCK_WEIGHT_LAST = best_params['stock_weight_last']
-            self.main.BOARD_WEIGHT = best_params['board_weight']
-            self.main.RUSH_ATTR_COEFFICIENT = best_params['rush_attr_coefficient']
-            self.main.YZ_OVERALL_WEIGHT = best_params['yz_overall_weight']
-            self.main.LETTER_ATTR_WEIGHT = best_params['letter_attr_weight']
-            self.main.REGION_ATTR_WEIGHT = best_params['region_attr_weight']
-            self.main.ATTR_COUNT_WEIGHT = best_params['attr_count_weight']
-            self.main.NEGATIVE_ATTR_COUNT_WEIGHT = best_params['negative_attr_count_weight']
-            self.main.NEGATIVE_OVERALL_WEIGHT = best_params['negative_overall_weight']
-            self.main.BOARD_PRESS_WEIGHT = best_params['board_press_weight']
-            self.main.NODE_GUIDE_WEIGHT = best_params['node_guide_weight']
-            self.main.HOLDER_RATIO_WEIGHT = best_params['holder_ratio_weight']
+            for key, val in best_params.items():
+                attr_name = BAYESIAN_TO_COEFFICIENT.get(key)
+                if attr_name:
+                    setattr(self.main, attr_name, val)
 
             try:
                 update_factor = final_shrink_factor if final_shrink_factor is not None else 0.5
@@ -370,12 +342,13 @@ class BayesianOptimizationThread(QThread):
                 bounds_lines = []
                 for param_name in BAYESIAN_BOUNDS:
                     lo, hi = new_bounds[param_name]
+                    if lo > hi:
+                        lo, hi = hi, lo  # 确保下界 <= 上界
                     comment = {
                         'stock_weight_first': '第一个股票的权重',
                         'stock_weight_last': '最后一个股票的权重',
                         'board_weight': '每板的权重',
                         'rushing_weight': '竞价抢筹权重(废弃)',
-                        'rush_attr_coefficient': '抢筹属性总系数 a',
                         'rush_pct_coefficient': '涨幅系数 b',
                         'rush_letter_attr_weight': '抢筹字母属性系数',
                         'rush_region_attr_weight': '抢筹地区属性系数',
@@ -385,7 +358,9 @@ class BayesianOptimizationThread(QThread):
                         'region_attr_weight': '地区属性系数',
                         'attr_count_weight': '属性数量差距系数',
                         'negative_attr_count_weight': '负反馈属性数量差距系数',
-                        'negative_overall_weight': '负反馈整体系数',
+                        'negative_attr_weight': '负反馈其他属性系数',
+                        'negative_letter_attr_weight': '负反馈字母属性系数',
+                        'negative_region_attr_weight': '负反馈地区属性系数',
                         'board_press_weight': '同板压制系数',
                         'node_guide_weight': '节点指引系数',
                         'holder_ratio_weight': '股东持股比例权重系数',
@@ -416,8 +391,6 @@ class BayesianOptimizationThread(QThread):
                       self.train_start, self.train_end, self.valid_start, self.valid_end))
                 conn.commit()
             finally:
-                for _attr, _val in _gov_backup.items():
-                    setattr(self, _attr, _val)
                 conn.close()
 
             self.finished_signal.emit({
@@ -528,9 +501,10 @@ class CorrelationAnalysisThread(QThread):
         try:
             param_keys = [
                 'stock_weight_first', 'stock_weight_last', 'board_weight',
-                'rush_attr_coefficient', 'rush_pct_coefficient', 'rush_letter_attr_weight', 'rush_region_attr_weight', 'rush_market_cap_coefficient', 'yz_overall_weight', 'letter_attr_weight',
+                'rush_pct_coefficient', 'rush_letter_attr_weight', 'rush_region_attr_weight', 'rush_market_cap_coefficient', 'yz_overall_weight', 'letter_attr_weight',
                 'region_attr_weight', 'attr_count_weight',
-                'negative_attr_count_weight', 'negative_overall_weight',
+                'negative_attr_count_weight',
+                'negative_attr_weight', 'negative_letter_attr_weight', 'negative_region_attr_weight',
                 'board_press_weight', 'node_guide_weight', 'holder_ratio_weight',
                 'market_cap_weight', 'market_cap_exponent',
             ]
@@ -539,7 +513,6 @@ class CorrelationAnalysisThread(QThread):
                 'stock_weight_first': '首股票权重',
                 'stock_weight_last': '末股票权重',
                 'board_weight': '每板权重',
-                'rush_attr_coefficient': '抢筹属性总系数 a',
                 'rush_pct_coefficient': '涨幅系数 b',
                 'rush_letter_attr_weight': '抢筹字母属性',
                 'rush_region_attr_weight': '抢筹地区属性',
@@ -549,7 +522,9 @@ class CorrelationAnalysisThread(QThread):
                 'region_attr_weight': '地区属性',
                 'attr_count_weight': '属性数量差距',
                 'negative_attr_count_weight': '负反馈数量差距',
-                'negative_overall_weight': '负反馈整体',
+                'negative_attr_weight': '负反馈其他',
+                'negative_letter_attr_weight': '负反馈字母',
+                'negative_region_attr_weight': '负反馈地区',
                 'board_press_weight': '同板压制',
                 'node_guide_weight': '节点指引',
                 'holder_ratio_weight': '股东持股',
