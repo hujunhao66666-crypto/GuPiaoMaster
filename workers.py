@@ -536,13 +536,21 @@ class CorrelationAnalysisThread(QThread):
             for key in param_keys:
                 orig_params[key] = getattr(self.main, BAYESIAN_TO_COEFFICIENT[key])
 
+            # 只计算已启用的因子（因子治理中禁用的跳过）
+            gov = getattr(self.main, '_factor_enabled', {})
+            active_keys = [k for k in param_keys if gov.get(k, True)]
+            skipped_keys = [k for k in param_keys if not gov.get(k, True)]
+            if skipped_keys:
+                self.log(f"[相关性] 跳过 {len(skipped_keys)} 个禁用因子: {skipped_keys}")
+            self.log(f"[相关性] 实际计算 {len(active_keys)} 个因子")
+
             n_samples = 200
             all_params = []
             all_scores = []
 
             for i in range(n_samples):
                 sample = {}
-                for key in param_keys:
+                for key in active_keys:
                     lo, hi = BAYESIAN_BOUNDS[key]
                     sample[key] = random.uniform(lo, hi)
                     setattr(self.main, BAYESIAN_TO_COEFFICIENT[key], sample[key])
@@ -555,7 +563,7 @@ class CorrelationAnalysisThread(QThread):
                 setattr(self.main, BAYESIAN_TO_COEFFICIENT[key], val)
 
             results = []
-            for key in param_keys:
+            for key in active_keys:
                 x = [s[key] for s in all_params]
                 y = all_scores
 

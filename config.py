@@ -4,10 +4,10 @@ import re
 
 class Coefficients:
     # 股票权重配置
-    STOCK_WEIGHT_FIRST = 1.8834      # 第一个股票的权重
-    STOCK_WEIGHT_LAST = 0.6819     # 最后一个股票的权重
+    STOCK_WEIGHT_FIRST = 2.2698      # 第一个股票的权重
+    STOCK_WEIGHT_LAST = 0.8528     # 最后一个股票的权重
     # 板数相关系数
-    BOARD_WEIGHT = 75.0108      # 每板的权重（× normalized board_count 0.05~1）
+    BOARD_WEIGHT = 73.0836      # 每板的权重（× normalized board_count 0.05~1）
     # 创业板系数
     GEM_FACTOR = 2.0              # 创业板股票系数（300开头）
     # 涨幅系数 b：每只抢筹股票的涨幅权重
@@ -28,14 +28,14 @@ class Coefficients:
     ATTR_COUNT_WEIGHT = 0.016700000000      # 属性数量差距系数（指数，0=无放大，1=线性）
     # 负反馈相关系数
     NEGATIVE_ATTR_COUNT_WEIGHT = 2.0302000  # 负反馈属性数量差距系数（指数）
-    NEGATIVE_ATTR_WEIGHT = 196.7869000      # 负反馈其他属性系数
-    NEGATIVE_LETTER_ATTR_WEIGHT = 196.7869000  # 负反馈字母属性系数
-    NEGATIVE_REGION_ATTR_WEIGHT = 196.7869000  # 负反馈地区属性系数
+    NEGATIVE_ATTR_WEIGHT = 32.8119000      # 负反馈其他属性系数
+    NEGATIVE_LETTER_ATTR_WEIGHT = -59.6449000  # 负反馈字母属性系数
+    NEGATIVE_REGION_ATTR_WEIGHT = 345.6938000  # 负反馈地区属性系数
     # 节点相关系数
     BOARD_PRESS_WEIGHT = 118.2477      # 同板压制系数（直接加分项）
     NODE_GUIDE_WEIGHT = 0.033600      # 节点指引系数（直接加分项）
     # 股东持股比例权重系数
-    HOLDER_RATIO_WEIGHT = 0.0100000000000000000    # 股东持股比例权重系数（× 归一化比例0~1）
+    HOLDER_RATIO_WEIGHT = 0.009700000000000000000    # 股东持股比例权重系数（× 归一化比例0~1）
     # 市值权重系数
     MARKET_CAP_WEIGHT = 0.0217      # 市值权重系数（× 归一化市值^指数，市值单位为亿）
     MARKET_CAP_EXPONENT = 0.7347    # 市值指数（<1 边际递减，=1 线性，>1 边际递增）

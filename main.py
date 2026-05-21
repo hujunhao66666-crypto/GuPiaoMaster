@@ -2747,6 +2747,57 @@ class StockMasterApp(QMainWindow):
 
         layout.addLayout(bidding_layout)
 
+        # 全量操作按钮
+        onekey_btn = QPushButton('一键获取全部')
+        onekey_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #17a2b8; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 6px 16px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #138496; }
+        ''')
+        onekey_btn.clicked.connect(self.onekey_fetch_all_bidding)
+        bidding_layout.addWidget(onekey_btn)
+
+        mega_batch_btn = QPushButton('全量批量获取')
+        mega_batch_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #e83e8c; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 6px 20px;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #c2185b; }
+        ''')
+        mega_batch_btn.clicked.connect(self.mega_batch_fetch)
+        bidding_layout.addWidget(mega_batch_btn)
+
+        bidding_layout.addStretch()
+
+        # hexin-v 令牌配置
+        hexin_layout = QHBoxLayout()
+        hexin_layout.addWidget(QLabel('hexin-v:'))
+        self.hexin_v_input = QLineEdit()
+        self.hexin_v_input.setPlaceholderText('输入hexin-v令牌')
+        self.hexin_v_input.setText(self.hexin_v)
+        self.hexin_v_input.setMaximumWidth(400)
+        self.hexin_v_input.setStyleSheet('font-size: 11px;')
+        hexin_layout.addWidget(self.hexin_v_input)
+        hexin_save_btn = QPushButton('更新')
+        hexin_save_btn.setStyleSheet('''
+            QPushButton {
+                background-color: #6c757d; color: white; font-weight: bold;
+                border: none; border-radius: 3px; padding: 2px 10px;
+            }
+            QPushButton:hover { background-color: #5a6268; }
+        ''')
+        hexin_save_btn.clicked.connect(self._save_hexin_v_from_ui)
+        hexin_layout.addWidget(hexin_save_btn)
+        hexin_layout.addStretch()
+        layout.addLayout(hexin_layout)
+
+
+
         # 竞价记录分为加分项和减分项两部分
         records_layout = QHBoxLayout()
         
@@ -2984,56 +3035,6 @@ class StockMasterApp(QMainWindow):
         self.rushing_attrs_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.rushing_attrs_table.cellChanged.connect(self.on_rush_attr_intensity_changed)
         rushing_group.addWidget(self.rushing_attrs_table)
-
-        # 全量操作按钮
-        mega_batch_layout = QHBoxLayout()
-        onekey_btn = QPushButton('一键获取全部')
-        onekey_btn.setStyleSheet('''
-            QPushButton {
-                background-color: #17a2b8; color: white; font-weight: bold;
-                border: none; border-radius: 3px; padding: 6px 16px;
-                font-size: 12px;
-            }
-            QPushButton:hover { background-color: #138496; }
-        ''')
-        onekey_btn.clicked.connect(self.onekey_fetch_all_bidding)
-        mega_batch_layout.addWidget(onekey_btn)
-
-        mega_batch_btn = QPushButton('全量批量获取')
-        mega_batch_btn.setStyleSheet('''
-            QPushButton {
-                background-color: #e83e8c; color: white; font-weight: bold;
-                border: none; border-radius: 3px; padding: 6px 20px;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #c2185b; }
-        ''')
-        mega_batch_btn.clicked.connect(self.mega_batch_fetch)
-        mega_batch_layout.addWidget(mega_batch_btn)
-        mega_batch_layout.addStretch()
-        rushing_group.addLayout(mega_batch_layout)
-
-        # hexin-v 令牌配置
-        hexin_layout = QHBoxLayout()
-        hexin_layout.addWidget(QLabel('hexin-v:'))
-        self.hexin_v_input = QLineEdit()
-        self.hexin_v_input.setPlaceholderText('输入hexin-v令牌')
-        self.hexin_v_input.setText(self.hexin_v)
-        self.hexin_v_input.setMaximumWidth(400)
-        self.hexin_v_input.setStyleSheet('font-size: 11px;')
-        hexin_layout.addWidget(self.hexin_v_input)
-        hexin_save_btn = QPushButton('更新')
-        hexin_save_btn.setStyleSheet('''
-            QPushButton {
-                background-color: #6c757d; color: white; font-weight: bold;
-                border: none; border-radius: 3px; padding: 2px 10px;
-            }
-            QPushButton:hover { background-color: #5a6268; }
-        ''')
-        hexin_save_btn.clicked.connect(self._save_hexin_v_from_ui)
-        hexin_layout.addWidget(hexin_save_btn)
-        hexin_layout.addStretch()
-        rushing_group.addLayout(hexin_layout)
 
         records_layout.addLayout(rushing_group)
         
