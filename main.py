@@ -15,7 +15,7 @@ import re
 import json
 
 # 导入配置文件
-from config import Coefficients, BAYESIAN_BOUNDS, COEFFICIENT_NAMES, BAYESIAN_TO_COEFFICIENT, SHRINK_FACTOR, SHRINK_ROUNDS, SHRINK_MIN_RATIO, L2_LAMBDA, L2_SCALE, NORM_YZ_SCORE, NORM_QC_SCORE, NORM_FF_SCORE, NORM_BOARD_COUNT, NORM_HOLDER_RATIO, NORM_BOARD_PRESS, NORM_NODE_GUIDE, REGION_NAMES, NORM_REGION_SCORE, ATTR_RENAME_MAP, ATTR_REMOVE_SET, NORM_MARKET_CAP
+from config import Coefficients, BAYESIAN_BOUNDS, COEFFICIENT_NAMES, BAYESIAN_TO_COEFFICIENT, SHRINK_FACTOR, SHRINK_ROUNDS, SHRINK_MIN_RATIO, L2_LAMBDA, L2_SCALE, NORM_YZ_SCORE, NORM_QC_SCORE, NORM_FF_SCORE, NORM_BOARD_COUNT, NORM_HOLDER_RATIO, NORM_BOARD_PRESS, NORM_NODE_GUIDE, REGION_NAMES, NORM_REGION_SCORE, ATTR_RENAME_MAP, ATTR_REMOVE_SET, NORM_MARKET_CAP, clean_attr_name
 # 尝试导入OCR库
 try:
     from PIL import Image
@@ -873,10 +873,12 @@ class StockMasterApp(QMainWindow):
 
         # 添加新属性
         for attr in attributes:
-            if attr not in existing_attrs:
-                cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
-                             (stock_id, date, attr))
-                existing_attrs.add(attr)
+            cleaned = clean_attr_name(attr)
+            if cleaned is None:
+                continue
+            if cleaned not in existing_attrs:
+                cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)', (stock_id, date, cleaned))
+                existing_attrs.add(cleaned)
 
         conn.commit()
         conn.close()
@@ -1916,10 +1918,12 @@ class StockMasterApp(QMainWindow):
         existing_attrs = set([row[0] for row in cursor.fetchall()])
 
         for attr in attributes:
-            if attr not in existing_attrs:
-                cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
-                             (stock_id, date, attr))
-                existing_attrs.add(attr)
+            cleaned = clean_attr_name(attr)
+            if cleaned is None:
+                continue
+            if cleaned not in existing_attrs:
+                cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)', (stock_id, date, cleaned))
+                existing_attrs.add(cleaned)
 
         conn.commit()
         conn.close()
@@ -5534,34 +5538,42 @@ class StockMasterApp(QMainWindow):
                     ORDER BY brs.pct_change DESC
                 ''', (today_str,))
                 rush_stock_data = cursor.fetchall()
-                for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
-                    # 获取该抢筹股票的属性
-                    cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
-                    for row in cursor.fetchall():
-                        attr = row[0]
-                        if attr in ATTR_REMOVE_SET:
-                            continue
-                        # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
-                        market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
-                        rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
-                        if attr not in attr_weighted_count:
-                            attr_weighted_count[attr] = 0
-                        attr_weighted_count[attr] += rush_score_base
-                        if len(attr) == 1 and attr.isalpha():
-                            # 字母属性
-                            if attr not in attr_weighted_count_qc_letter:
-                                attr_weighted_count_qc_letter[attr] = 0
-                            attr_weighted_count_qc_letter[attr] += rush_score_base
-                        elif attr in REGION_NAMES:
-                            # 地区属性
-                            if attr not in attr_weighted_count_qc_region:
-                                attr_weighted_count_qc_region[attr] = 0
-                            attr_weighted_count_qc_region[attr] += rush_score_base
-                        else:
-                            # 其他属性
-                            if attr not in attr_weighted_count_qc:
-                                attr_weighted_count_qc[attr] = 0
-                            attr_weighted_count_qc[attr] += rush_score_base
+                # skip rush scoring when all rush factors disabled by governance
+                _all_rush_disabled = (
+                    self.RUSH_PCT_COEFFICIENT == 0
+                    and self.RUSH_LETTER_ATTR_WEIGHT == 0
+                    and self.RUSH_REGION_ATTR_WEIGHT == 0
+                    and self.RUSH_MARKET_CAP_COEFFICIENT == 0
+                )
+                if not _all_rush_disabled:
+                    for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
+                        # 获取该抢筹股票的属性
+                        cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+                        for row in cursor.fetchall():
+                            attr = row[0]
+                            if attr in ATTR_REMOVE_SET:
+                                continue
+                            # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
+                            market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
+                            rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
+                            if attr not in attr_weighted_count:
+                                attr_weighted_count[attr] = 0
+                            attr_weighted_count[attr] += rush_score_base
+                            if len(attr) == 1 and attr.isalpha():
+                                # 字母属性
+                                if attr not in attr_weighted_count_qc_letter:
+                                    attr_weighted_count_qc_letter[attr] = 0
+                                attr_weighted_count_qc_letter[attr] += rush_score_base
+                            elif attr in REGION_NAMES:
+                                # 地区属性
+                                if attr not in attr_weighted_count_qc_region:
+                                    attr_weighted_count_qc_region[attr] = 0
+                                attr_weighted_count_qc_region[attr] += rush_score_base
+                            else:
+                                # 其他属性
+                                if attr not in attr_weighted_count_qc:
+                                    attr_weighted_count_qc[attr] = 0
+                                attr_weighted_count_qc[attr] += rush_score_base
 
                 # 打印属性得分，用于调试
                 print("Attribute scores:")
@@ -6995,8 +7007,11 @@ class StockMasterApp(QMainWindow):
             saved_attrs = 0
             for bn in all_board_names:
                 if bn not in existing_attrs:
+                    cleaned = clean_attr_name(bn)
+                    if cleaned is None:
+                        continue
                     cursor.execute('INSERT INTO stock_attributes (stock_id, date, attribute) VALUES (?, ?, ?)',
-                                   (stock_id, date, bn))
+                                   (stock_id, date, cleaned))
                     saved_attrs += 1
             conn.commit()
 
@@ -8952,34 +8967,42 @@ class StockMasterApp(QMainWindow):
                 ORDER BY brs.pct_change DESC
             ''', (today_str,))
             rush_stock_data = cursor.fetchall()
-            for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
-                # 获取该抢筹股票的属性
-                cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
-                for row in cursor.fetchall():
-                    attr = row[0]
-                    if attr in ATTR_REMOVE_SET:
-                        continue
-                    # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
-                    market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
-                    rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
-                    if attr not in attr_weighted_count:
-                        attr_weighted_count[attr] = 0
-                    attr_weighted_count[attr] += rush_score_base
-                    if len(attr) == 1 and attr.isalpha():
-                        # 字母属性
-                        if attr not in attr_weighted_count_qc_letter:
-                            attr_weighted_count_qc_letter[attr] = 0
-                        attr_weighted_count_qc_letter[attr] += rush_score_base
-                    elif attr in REGION_NAMES:
-                        # 地区属性
-                        if attr not in attr_weighted_count_qc_region:
-                            attr_weighted_count_qc_region[attr] = 0
-                        attr_weighted_count_qc_region[attr] += rush_score_base
-                    else:
-                        # 其他属性
-                        if attr not in attr_weighted_count_qc:
-                            attr_weighted_count_qc[attr] = 0
-                        attr_weighted_count_qc[attr] += rush_score_base
+            # skip rush scoring when all rush factors disabled by governance
+            _all_rush_disabled = (
+                self.RUSH_PCT_COEFFICIENT == 0
+                and self.RUSH_LETTER_ATTR_WEIGHT == 0
+                and self.RUSH_REGION_ATTR_WEIGHT == 0
+                and self.RUSH_MARKET_CAP_COEFFICIENT == 0
+            )
+            if not _all_rush_disabled:
+                for idx, (pct_change, stock_id, total_market_cap) in enumerate(rush_stock_data):
+                    # 获取该抢筹股票的属性
+                    cursor.execute('SELECT attribute FROM stock_attributes WHERE stock_id = ?', (stock_id,))
+                    for row in cursor.fetchall():
+                        attr = row[0]
+                        if attr in ATTR_REMOVE_SET:
+                            continue
+                        # 抢筹加分 = 涨幅 x 涨幅系数b x 市值因子（暂不乘属性系数，在第二遍乘以各自的分类系数）
+                        market_cap_billion = (total_market_cap / 100000000) if total_market_cap else 50.0
+                        rush_score_base = pct_change * self.RUSH_PCT_COEFFICIENT * (market_cap_billion * self.RUSH_MARKET_CAP_COEFFICIENT)
+                        if attr not in attr_weighted_count:
+                            attr_weighted_count[attr] = 0
+                        attr_weighted_count[attr] += rush_score_base
+                        if len(attr) == 1 and attr.isalpha():
+                            # 字母属性
+                            if attr not in attr_weighted_count_qc_letter:
+                                attr_weighted_count_qc_letter[attr] = 0
+                            attr_weighted_count_qc_letter[attr] += rush_score_base
+                        elif attr in REGION_NAMES:
+                            # 地区属性
+                            if attr not in attr_weighted_count_qc_region:
+                                attr_weighted_count_qc_region[attr] = 0
+                            attr_weighted_count_qc_region[attr] += rush_score_base
+                        else:
+                            # 其他属性
+                            if attr not in attr_weighted_count_qc:
+                                attr_weighted_count_qc[attr] = 0
+                            attr_weighted_count_qc[attr] += rush_score_base
 
             # 计算属性的总出现次数（绝对值）
             attr_total_counts = {}
